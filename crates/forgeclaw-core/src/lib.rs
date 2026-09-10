@@ -1,7 +1,7 @@
 pub mod domain;
 pub mod traits;
 
-pub use domain::{ForgeEvent, RepoId, Subject, ThreadKey};
+pub use domain::*;
 pub use traits::*;
 
 #[derive(Debug, thiserror::Error)]

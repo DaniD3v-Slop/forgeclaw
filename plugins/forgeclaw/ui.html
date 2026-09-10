@@ -70,7 +70,7 @@ const EVENTS = {
   "issue.assigned": { title:"Issue assigned", description:"Implement or answer newly assigned issues.", fields:{assignees:"Assigned to",author:"Issue author"} },
   "pull_request.review_requested": { title:"Review requested", description:"Review a pull request when ForgeClaw is requested.", fields:{reviewer:"Requested reviewer",author:"Pull request author"} },
   "pull_request.changes_requested": { title:"Changes requested", description:"Update a pull request after a request-changes review.", fields:{reviewer:"Review author",body:"Review text"} },
-  "ci.run_completed": { title:"CI run completed", description:"Investigate completed CI runs, usually failures.", fields:{conclusion:"Conclusion",pr_author:"Pull request author",workflow:"Workflow name"} },
+  "ci.run_completed": { title:"CI run completed", description:"Investigate completed CI runs, usually failures.", fields:{conclusion:"Conclusion",pr_author:"Pull request author",workflow:"Workflow file"} },
   "pull_request.opened": { title:"Pull request opened", description:"Optionally review newly opened pull requests.", fields:{author:"Pull request author"} }
 };
 const CSRF="__FORGECLAW_CSRF__";

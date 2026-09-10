@@ -5,8 +5,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::{Json, Router, routing::post};
-use forgeclaw_core::{NewPr, RepoId, Review, ThreadKey, Verdict};
-use forgeclaw_forgejo::Forgejo;
+use forgeclaw_core::{Forge, NewPr, RepoId, Review, ThreadKey, Verdict};
 use serde_json::{Value, json};
 use tempfile::tempdir;
 use tokio::process::Command;
@@ -20,8 +19,7 @@ use crate::grants::{GrantStore, SessionKey};
 /// writes, while credentialed Git operations run only in daemon-owned paths.
 pub struct ToolServer {
     forge_url: Url,
-    forge: Arc<Forgejo>,
-    git_token: String,
+    forge: Arc<dyn Forge>,
     authorization: Option<String>,
     grants: Arc<GrantStore>,
     workspace: PathBuf,
@@ -30,8 +28,7 @@ pub struct ToolServer {
 impl ToolServer {
     pub fn new(
         forge_url: Url,
-        forge: Arc<Forgejo>,
-        git_token: impl Into<String>,
+        forge: Arc<dyn Forge>,
         authorization: Option<String>,
         grants: Arc<GrantStore>,
         workspace: PathBuf,
@@ -39,7 +36,6 @@ impl ToolServer {
         Self {
             forge_url,
             forge,
-            git_token: git_token.into(),
             authorization,
             grants,
             workspace,
@@ -139,9 +135,11 @@ async fn tool_call(
             let thread = subject(arguments)?;
             let body = string(arguments, "body")?;
             let reply_to = arguments.get("reply_to").and_then(Value::as_u64);
-            require_write(server, session, &thread)?;
+            let token = require_write(server, session, &thread)?;
             let id = server
                 .forge
+                .with_token(&token.secret)
+                .map_err(|error| error.to_string())?
                 .comment(&thread, body, reply_to)
                 .await
                 .map_err(|error| error.to_string())?;
@@ -154,9 +152,11 @@ async fn tool_call(
             let body = string(arguments, "body")?;
             let branch = string(arguments, "branch")?;
             valid_branch(branch)?;
-            require_write(server, session, &thread)?;
+            let token = require_write(server, session, &thread)?;
             let id = server
                 .forge
+                .with_token(&token.secret)
+                .map_err(|error| error.to_string())?
                 .create_pr(
                     &thread.repo,
                     NewPr {
@@ -179,9 +179,11 @@ async fn tool_call(
             let forgeclaw_core::Subject::Pr(pr) = thread.subject else {
                 return Err("reviews require a pull request subject".into());
             };
-            require_write(server, session, &thread)?;
+            let token = require_write(server, session, &thread)?;
             server
                 .forge
+                .with_token(&token.secret)
+                .map_err(|error| error.to_string())?
                 .submit_review(
                     &thread.repo,
                     pr,
@@ -197,35 +199,44 @@ async fn tool_call(
         }
         "forge_checkout" => {
             let thread = subject(arguments)?;
-            let writable = can_write(server, session, &thread);
+            let token = authorized_token(server, session, &thread);
+            let writable = token.is_some();
             let path = server.checkout_path(&thread, writable);
             let repo = if writable {
                 server
                     .forge
+                    .with_token(&token.as_ref().expect("writable checkout has token").secret)
+                    .map_err(|error| error.to_string())?
                     .ensure_fork(&thread.repo)
                     .await
                     .map_err(|error| error.to_string())?
             } else {
                 thread.repo.clone()
             };
-            sync_checkout(&server.clone_url(&repo)?, &server.git_token, &path).await?
+            sync_checkout(
+                &server.clone_url(&repo)?,
+                token.as_ref().map(|token| token.secret.as_str()),
+                &path,
+            )
+            .await?
         }
         "forge_push" => {
             let thread = subject(arguments)?;
             let branch = string(arguments, "branch")?;
             valid_branch(branch)?;
-            require_write(server, session, &thread)?;
+            let token = require_write(server, session, &thread)?;
             let path = server.checkout_path(&thread, true);
             if !path.join(".git").is_dir() {
                 return Err("checkout the authorized subject before pushing".into());
             }
             let fork = server
                 .forge
+                .with_token(&token.secret)
+                .map_err(|error| error.to_string())?
                 .ensure_fork(&thread.repo)
                 .await
                 .map_err(|error| error.to_string())?;
-            push_from_clean_repo(&path, &server.clone_url(&fork)?, &server.git_token, branch)
-                .await?;
+            push_from_clean_repo(&path, &server.clone_url(&fork)?, &token.secret, branch).await?;
             format!("pushed branch {branch}")
         }
         other => return Err(format!("unknown forge tool: {other}")),
@@ -233,29 +244,31 @@ async fn tool_call(
     Ok(json!({"content": [{"type": "text", "text": text}]}))
 }
 
-fn can_write(server: &ToolServer, session: Option<&str>, thread: &ThreadKey) -> bool {
+fn authorized_token(
+    server: &ToolServer,
+    session: Option<&str>,
+    thread: &ThreadKey,
+) -> Option<forgeclaw_core::ScopedToken> {
     server
         .grants
-        .can_write(&SessionKey::new(session.unwrap_or_default()), thread)
+        .authorized_token(&SessionKey::new(session.unwrap_or_default()), thread)
 }
 
 fn require_write(
     server: &ToolServer,
     session: Option<&str>,
     thread: &ThreadKey,
-) -> Result<(), String> {
-    can_write(server, session, thread)
-        .then_some(())
-        .ok_or_else(|| {
-            if session.is_some() {
-                "write is not authorized for this subject".into()
-            } else {
-                "missing OpenClaw session identity".into()
-            }
-        })
+) -> Result<forgeclaw_core::ScopedToken, String> {
+    authorized_token(server, session, thread).ok_or_else(|| {
+        if session.is_some() {
+            "write is not authorized for this subject".into()
+        } else {
+            "missing OpenClaw session identity".into()
+        }
+    })
 }
 
-async fn clone(url: &Url, token: &str, path: &Path) -> Result<(), String> {
+async fn clone(url: &Url, token: Option<&str>, path: &Path) -> Result<(), String> {
     let parent = path.parent().ok_or("checkout path has no parent")?;
     tokio::fs::create_dir_all(parent)
         .await
@@ -267,10 +280,10 @@ async fn clone(url: &Url, token: &str, path: &Path) -> Result<(), String> {
         url.as_str(),
         path.to_str().ok_or("invalid checkout path")?,
     ]);
-    run_git(command, Some(token)).await
+    run_git(command, token).await
 }
 
-async fn sync_checkout(url: &Url, token: &str, path: &Path) -> Result<String, String> {
+async fn sync_checkout(url: &Url, token: Option<&str>, path: &Path) -> Result<String, String> {
     if !path.join(".git").is_dir() {
         clone(url, token, path).await?;
         return Ok(path.display().to_string());
@@ -286,7 +299,7 @@ async fn sync_checkout(url: &Url, token: &str, path: &Path) -> Result<String, St
         url.as_str(),
         mirror_path.to_str().ok_or("invalid temporary path")?,
     ]);
-    run_git(network_clone, Some(token)).await?;
+    run_git(network_clone, token).await?;
 
     let mut fetch = Command::new("git");
     fetch.current_dir(path).args([
@@ -307,6 +320,7 @@ async fn sync_checkout(url: &Url, token: &str, path: &Path) -> Result<String, St
         exists
             .current_dir(path)
             .args(["show-ref", "--verify", "--quiet", &remote_ref]);
+        scrub_git_environment(&mut exists);
         if exists
             .status()
             .await
@@ -367,9 +381,9 @@ async fn push_from_clean_repo(
 }
 
 async fn run_git(mut command: Command, token: Option<&str>) -> Result<(), String> {
-    // Callers pass credentials only to commands whose Git directory is either
-    // new or daemon-owned. Agent-controlled repositories never receive this
-    // environment.
+    // Git may inspect agent-controlled repository configuration. Never let
+    // those subprocesses inherit the daemon's permanent forge credentials.
+    scrub_git_environment(&mut command);
     if let Some(token) = token {
         command
             .env("GIT_CONFIG_COUNT", "1")
@@ -387,16 +401,25 @@ async fn run_git(mut command: Command, token: Option<&str>) -> Result<(), String
 }
 
 async fn git_output<const N: usize>(path: &Path, args: [&str; N]) -> Result<String, String> {
-    let output = Command::new("git")
-        .current_dir(path)
-        .args(args)
-        .output()
-        .await
-        .map_err(|error| error.to_string())?;
+    let mut command = Command::new("git");
+    command.current_dir(path).args(args);
+    scrub_git_environment(&mut command);
+    let output = command.output().await.map_err(|error| error.to_string())?;
     if !output.status.success() {
         return Err("git operation failed".into());
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn scrub_git_environment(command: &mut Command) {
+    let path = std::env::var_os("PATH").unwrap_or_else(|| "/usr/local/bin:/usr/bin:/bin".into());
+    command
+        .env_clear()
+        .env("PATH", path)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("LC_ALL", "C");
 }
 
 fn valid_branch(branch: &str) -> Result<(), String> {
@@ -487,6 +510,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn git_environment_drops_daemon_secrets() {
+        let mut command = Command::new("env");
+        command.env("FORGECLAW_FORGE_TOKEN", "permanent-secret");
+        scrub_git_environment(&mut command);
+        let output = command.output().await.unwrap();
+        let environment = String::from_utf8(output.stdout).unwrap();
+        assert!(!environment.contains("FORGECLAW_FORGE_TOKEN"));
+        assert!(!environment.contains("permanent-secret"));
+    }
+
+    #[tokio::test]
     async fn existing_clean_checkout_fast_forwards() {
         let root = tempdir().unwrap();
         let origin = root.path().join("origin.git");
@@ -516,12 +550,16 @@ mod tests {
         );
 
         let url = Url::from_file_path(&origin).unwrap();
-        sync_checkout(&url, "dummy-token", &checkout).await.unwrap();
+        sync_checkout(&url, Some("dummy-token"), &checkout)
+            .await
+            .unwrap();
         std::fs::write(seed.join("README.md"), "two\n").unwrap();
         git(&seed, &["commit", "-am", "two"]);
         git(&seed, &["push"]);
 
-        sync_checkout(&url, "dummy-token", &checkout).await.unwrap();
+        sync_checkout(&url, Some("dummy-token"), &checkout)
+            .await
+            .unwrap();
         assert_eq!(
             std::fs::read_to_string(checkout.join("README.md")).unwrap(),
             "two\n"
@@ -541,7 +579,7 @@ mod tests {
                 .success()
         );
         let url = Url::from_file_path(&origin).unwrap();
-        clone(&url, "dummy-token", &checkout).await.unwrap();
+        clone(&url, Some("dummy-token"), &checkout).await.unwrap();
         assert!(
             StdCommand::new("git")
                 .current_dir(&checkout)

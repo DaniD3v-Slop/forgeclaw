@@ -14,7 +14,7 @@ use axum::{Router, response::IntoResponse};
 use forgeclaw::grants::GrantStore;
 use forgeclaw::http_tools::ToolServer;
 use forgeclaw::router::{OpenClawCli, Router as ForgeRouter, TriggerRule, WebhookForge};
-use forgeclaw_core::Result;
+use forgeclaw_core::{Forge, Result, ScopedToken};
 use forgeclaw_forgejo::{Forgejo, webhook_events};
 use serde::Deserialize;
 use url::Url;
@@ -71,8 +71,7 @@ struct ForgeConfig {
     url: Url,
     token_env: String,
     webhook_secret_env: String,
-    #[serde(default)]
-    password_env: Option<String>,
+    password_env: String,
 }
 
 struct ForgejoWebhook {
@@ -138,6 +137,7 @@ async fn webhook(
                     )
                 })?
                 .trigger;
+            TriggerRule::validate_all(&rules)?;
             state.router.replace_rules(rules).await;
             state.router.deliver(events).await
         }
@@ -160,24 +160,28 @@ async fn main() -> Result<()> {
     })?;
     let read_token = required_env(&daemon.forge.token_env)?;
     let secret = required_env(&daemon.forge.webhook_secret_env)?;
-    let password = daemon
-        .forge
-        .password_env
-        .as_deref()
-        .map(required_env)
-        .transpose()?;
+    let password = required_env(&daemon.forge.password_env)?;
     let authorization = Some(required_env(&daemon.authorization_env)?);
+    TriggerRule::validate_all(&daemon.trigger)?;
     let forge = Arc::new(Forgejo::new(
         daemon.forge.url.clone(),
         &read_token,
-        password,
+        Some(password),
     )?);
     let grants = Arc::new(GrantStore::default());
     let router = Arc::new(ForgeRouter::new(
         ForgejoWebhook {
             forge: forge.clone(),
         },
-        OpenClawCli::new("openclaw"),
+        OpenClawCli::new(
+            "openclaw",
+            vec![
+                daemon.forge.token_env.clone(),
+                daemon.forge.password_env.clone(),
+                daemon.forge.webhook_secret_env.clone(),
+                daemon.authorization_env.clone(),
+            ],
+        ),
         "forgejo",
         daemon.trigger,
         grants.clone(),
@@ -185,7 +189,7 @@ async fn main() -> Result<()> {
     ));
     let tools = ToolServer::new(
         daemon.forge.url,
-        read_token,
+        forge,
         authorization,
         grants,
         daemon.workspace,
@@ -230,7 +234,8 @@ mod tests {
                     "forge": {
                         "url": "http://forgejo:3000/",
                         "token_env": "TOKEN",
-                        "webhook_secret_env": "SECRET"
+                        "webhook_secret_env": "SECRET",
+                        "password_env": "LEGACY_PASSWORD"
                     }
                 }}
             }}

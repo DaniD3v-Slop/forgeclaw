@@ -23,12 +23,16 @@ impl SessionKey {
 
 /// A currently valid authority to mutate one forge thread.
 ///
-/// The token remains private so callers can ask whether an action is allowed
-/// without accidentally logging or serializing a forge credential.
 pub struct Grant {
     thread: ThreadKey,
     token: ScopedToken,
     expires_at: Instant,
+}
+
+impl Grant {
+    pub fn token(&self) -> &ScopedToken {
+        &self.token
+    }
 }
 
 /// In-memory authority store shared by the webhook router and tool server.
@@ -53,25 +57,29 @@ impl GrantStore {
         self.lock().insert(session, grant);
     }
 
-    pub fn remove(&self, session: &SessionKey) {
-        self.lock().remove(session);
+    pub fn take(&self, session: &SessionKey) -> Option<Grant> {
+        self.lock().remove(session)
     }
 
-    /// Returns a scoped credential only after the same exact-subject check
-    /// used for authorization. This is daemon-internal; it is never serialized
-    /// into a tool response.
+    pub fn can_write(&self, session: &SessionKey, thread: &ThreadKey) -> bool {
+        let grants = self.lock();
+        let Some(grant) = grants.get(session) else {
+            return false;
+        };
+        if grant.expires_at <= Instant::now() {
+            return false;
+        }
+        grant.thread == *thread
+    }
+
     pub fn authorized_token(
         &self,
         session: &SessionKey,
         thread: &ThreadKey,
     ) -> Option<ScopedToken> {
-        let mut grants = self.lock();
+        let grants = self.lock();
         let grant = grants.get(session)?;
-        if grant.expires_at <= Instant::now() {
-            grants.remove(session);
-            return None;
-        }
-        (grant.thread == *thread).then(|| grant.token.clone())
+        (grant.expires_at > Instant::now() && grant.thread == *thread).then(|| grant.token.clone())
     }
 
     fn lock(&self) -> MutexGuard<'_, HashMap<SessionKey, Grant>> {
@@ -97,7 +105,7 @@ mod tests {
     fn token() -> ScopedToken {
         ScopedToken {
             id: 1,
-            secret: "not-a-real-token".into(),
+            secret: "disposable".into(),
         }
     }
 
@@ -133,7 +141,7 @@ mod tests {
         let session = SessionKey::new("session-a");
         store.insert(session.clone(), thread(1), token(), Duration::from_secs(60));
 
-        store.remove(&session);
+        store.take(&session);
         assert!(!store.can_write(&session, &thread(1)));
     }
 }

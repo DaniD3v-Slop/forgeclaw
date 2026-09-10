@@ -35,8 +35,7 @@
         "properties": {
           "url": { "type": "string", "format": "uri" },
           "token_env": { "type": "string" },
-          "webhook_secret_env": { "type": "string" },
-          "password_env": { "type": "string" }
+          "webhook_secret_env": { "type": "string" }
         }
       },
       "trigger": {
@@ -46,7 +45,17 @@
           "additionalProperties": false,
           "required": ["on"],
           "properties": {
-            "on": { "type": "string", "pattern": "^[a-z_]+\\.[a-z_]+$" },
+            "on": {
+              "type": "string",
+              "enum": [
+                "comment.created",
+                "issue.assigned",
+                "pull_request.review_requested",
+                "pull_request.changes_requested",
+                "ci.run_completed",
+                "pull_request.opened"
+              ]
+            },
             "enabled": { "type": "boolean" },
             "filter": {
               "oneOf": [

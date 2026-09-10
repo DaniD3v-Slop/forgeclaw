@@ -11,9 +11,10 @@ podman compose up -d forgejo
 ```
 
 Create the bot account in the local Forgejo instance and create an access token
-with `write:repository`, `write:issue`, and `read:user` scopes. Register a
-webhook pointing to `http://forgeclaw:3080/webhook`. Put the access token and
-webhook secret in the corresponding `.env` fields.
+with `read:repository`, `read:issue`, and `read:user` scopes. Register a
+webhook pointing to `http://forgeclaw:3080/webhook`. Put the bot password,
+access token, and webhook secret in the corresponding `.env` fields. The
+password is used only to mint and revoke a scoped token for each routed turn.
 Then start the base stack:
 
 ```sh

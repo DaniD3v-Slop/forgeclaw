@@ -14,8 +14,6 @@ forgeclaw-core.workspace = true
 forgeclaw-forgejo.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tempfile = "3.27.0"
 tokio.workspace = true
 url.workspace = true
-
-[dev-dependencies]
-tempfile = "3.27.0"

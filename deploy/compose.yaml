@@ -57,6 +57,11 @@ services:
       FORGECLAW_MCP_AUTHORIZATION: ${FORGECLAW_MCP_AUTHORIZATION:-}
     ports:
       - "127.0.0.1:${OPENCLAW_PORT:-18790}:18789"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:18789/"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
     volumes:
       - openclaw_config:/home/node/.config/openclaw
       - openclaw_data:/home/node/.openclaw
@@ -72,6 +77,7 @@ services:
     command: ["forgeclaw"]
     environment:
       FORGECLAW_FORGE_TOKEN: ${FORGECLAW_FORGE_TOKEN:-}
+      FORGECLAW_FORGE_PASSWORD: ${FORGECLAW_FORGE_PASSWORD:-}
       FORGECLAW_WEBHOOK_SECRET: ${FORGECLAW_WEBHOOK_SECRET:-}
       FORGECLAW_MCP_AUTHORIZATION: ${FORGECLAW_MCP_AUTHORIZATION:-}
       OPENCLAW_GATEWAY_URL: ws://openclaw-gateway:18789
@@ -81,11 +87,9 @@ services:
       forgejo:
         condition: service_healthy
       openclaw-gateway:
-        condition: service_started
+        condition: service_healthy
       openclaw-init:
         condition: service_completed_successfully
-    ports:
-      - "127.0.0.1:${FORGECLAW_PORT:-3081}:3080"
     volumes:
       - openclaw_config:/home/node/.config/openclaw
       - openclaw_data:/home/node/.openclaw

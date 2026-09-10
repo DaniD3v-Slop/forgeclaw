@@ -85,7 +85,7 @@ pub fn webhook_events(signature: &str, secret: &str, body: &[u8]) -> Result<Vec<
         && let Some(pr_number) = number(pr, "/number")
     {
         let review_type = string(review, "/type");
-        let reviewer = user(&hook, "/requested_reviewer");
+        let reviewer = user(&hook, "/sender");
         let body = string(review, "/content");
         if review_type == "pull_request_review_rejected" {
             events.push(event(
@@ -328,7 +328,6 @@ mod tests {
             "action": "reviewed",
             "repository": {"full_name": "o/r"},
             "sender": {"login": "reviewer"},
-            "requested_reviewer": {"login": "reviewer"},
             "pull_request": {"number": 8, "user": {"login": "alice"}},
             "review": {
                 "type": "pull_request_review_rejected",
@@ -347,7 +346,6 @@ mod tests {
             "action": "reviewed",
             "repository": {"full_name": "o/r"},
             "sender": {"login": "reviewer"},
-            "requested_reviewer": {"login": "reviewer"},
             "pull_request": {"number": 8, "user": {"login": "alice"}},
             "review": {
                 "type": "pull_request_review_comment",

@@ -1,11 +1,20 @@
-use forgeclaw_core::{NewPr, RepoId, Subject, ThreadKey};
+use forgeclaw_core::{Forge, NewPr, RepoId, Subject, ThreadKey};
 use forgeclaw_forgejo::Forgejo;
 use serde_json::{Value, json};
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn client(server: &MockServer) -> Forgejo {
-    Forgejo::new(server.uri().parse().unwrap(), "test-token").unwrap()
+    Forgejo::new(server.uri().parse().unwrap(), "test-token", None).unwrap()
+}
+
+fn token_client(server: &MockServer) -> Forgejo {
+    Forgejo::new(
+        server.uri().parse().unwrap(),
+        "read-token",
+        Some("test-password".into()),
+    )
+    .unwrap()
 }
 
 fn repo() -> RepoId {
@@ -17,6 +26,47 @@ fn thread(subject: Subject) -> ThreadKey {
         repo: repo(),
         subject,
     }
+}
+
+#[tokio::test]
+async fn task_tokens_are_minted_and_revoked_with_basic_auth() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/user"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"login": "bot"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/users/bot/tokens"))
+        .and(wiremock::matchers::header(
+            "authorization",
+            "Basic Ym90OnRlc3QtcGFzc3dvcmQ=",
+        ))
+        .and(body_partial_json(json!({
+            "name": "one-turn",
+            "scopes": ["write:repository", "write:issue", "read:user"]
+        })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "id": 4,
+            "name": "one-turn",
+            "sha1": "scoped-token"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/users/bot/tokens/4"))
+        .and(wiremock::matchers::header(
+            "authorization",
+            "Basic Ym90OnRlc3QtcGFzc3dvcmQ=",
+        ))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    let forge = token_client(&server);
+    let token = forge.mint_token("one-turn").await.unwrap();
+    assert_eq!(token.id, 4);
+    forge.revoke_token(&token).await.unwrap();
 }
 
 async fn mock(server: &MockServer, verb: &str, route: &str, status: u16, body: Value) {
@@ -164,11 +214,4 @@ async fn existing_fork_is_reused() {
         client(&server).ensure_fork(&repo()).await.unwrap(),
         "bot/r".parse().unwrap()
     );
-}
-
-#[tokio::test]
-async fn minting_a_turn_token_requires_the_bot_password() {
-    let server = MockServer::start().await;
-    mock(&server, "GET", "/api/v1/user", 200, json!({"login": "bot"})).await;
-    assert!(client(&server).mint_token("turn").await.is_err());
 }

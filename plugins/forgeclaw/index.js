@@ -11,6 +11,14 @@ const UI_PAGE = readFileSync(new URL("./ui.html", import.meta.url), "utf8").repl
   UI_CSRF,
 );
 const MAX_CONFIG_BODY = 64 * 1024;
+const EVENT_FIELDS = {
+  "comment.created": new Set(["mentions", "assignees", "author", "body"]),
+  "issue.assigned": new Set(["assignees", "author"]),
+  "pull_request.review_requested": new Set(["reviewer", "author"]),
+  "pull_request.changes_requested": new Set(["reviewer", "body"]),
+  "ci.run_completed": new Set(["conclusion", "pr_author", "workflow"]),
+  "pull_request.opened": new Set(["author"]),
+};
 
 const string = { type: "string" };
 const subject = {
@@ -87,12 +95,11 @@ function object(properties, required) {
   return { type: "object", additionalProperties: false, properties, required };
 }
 
-function createTool(definition, context, config) {
+function createTool(definition, context, config, authorization) {
   return {
     ...definition,
     resultContentSource: "network",
     async execute(_toolCallId, arguments_, signal) {
-      const authorization = process.env[config.authorization_env];
       if (!authorization) {
         throw new Error(`${config.authorization_env} is not set in the OpenClaw gateway`);
       }
@@ -163,7 +170,7 @@ function validateTriggers(value) {
     if (keys.some((key) => !["on", "enabled", "filter"].includes(key))) {
       throw new Error(`trigger ${index + 1} contains an unknown field`);
     }
-    if (typeof trigger.on !== "string" || !/^[a-z_]+\.[a-z_]+$/.test(trigger.on)) {
+    if (typeof trigger.on !== "string" || !EVENT_FIELDS[trigger.on]) {
       throw new Error(`trigger ${index + 1} has an invalid event`);
     }
     if (trigger.enabled !== undefined && typeof trigger.enabled !== "boolean") {
@@ -186,7 +193,12 @@ function validateTriggers(value) {
         throw new Error(`trigger ${index + 1} has too many filter conditions`);
       }
       for (const [field, pattern] of Object.entries(clause)) {
-        if (!/^[a-z_][a-z0-9_]*$/.test(field) || typeof pattern !== "string" || !pattern) {
+        if (
+          !EVENT_FIELDS[trigger.on].has(field) ||
+          typeof pattern !== "string" ||
+          !pattern ||
+          pattern === "!"
+        ) {
           throw new Error(`trigger ${index + 1} has an invalid filter condition`);
         }
       }
@@ -261,6 +273,9 @@ export default definePluginEntry({
   description: "Forge automation configuration and teammate skill.",
   register(api) {
     const config = api.pluginConfig;
+    // Capture the bridge credential before agent turns can spawn commands,
+    // then remove it from the environment inherited by those commands.
+    const authorization = takeAuthorization(config.authorization_env);
     api.registerHttpRoute({
       path: `${UI_ROOT}/`,
       auth: "gateway",
@@ -274,7 +289,7 @@ export default definePluginEntry({
       handler: createUiHandler(api),
     });
     for (const definition of tools) {
-      api.registerTool((context) => createTool(definition, context, config), {
+      api.registerTool((context) => createTool(definition, context, config, authorization), {
         name: definition.name,
       });
     }

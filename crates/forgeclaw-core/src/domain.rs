@@ -114,6 +114,44 @@ impl ForgeEvent {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct IssueSummary {
+    pub number: u64,
+    pub title: String,
+    pub state: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewPr {
+    pub title: String,
+    pub body: String,
+    /// Head branch; the base is always the repo's default branch.
+    pub branch: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct Review {
+    pub verdict: Verdict,
+    pub summary: String,
+    pub inline: Vec<InlineComment>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Verdict {
+    Approve,
+    RequestChanges,
+    Comment,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InlineComment {
+    pub path: String,
+    pub line: u64,
+    pub body: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

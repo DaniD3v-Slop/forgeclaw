@@ -10,7 +10,8 @@ use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use forgeclaw_core::{
-    Error, IssueSummary, NewPr, RepoId, Result, Review, Subject, ThreadKey, Verdict,
+    Error, Forge, IssueSummary, NewPr, RepoId, Result, Review, ScopedToken, Subject, ThreadKey,
+    Verdict,
 };
 use forgejo_api::structs::{ActionRun, IssueListIssuesQuery, StateType};
 use forgejo_api::{ApiErrorKind, Auth, ForgejoError};
@@ -19,7 +20,6 @@ use url::Url;
 
 const EXCERPT_MAX: usize = 64 * 1024;
 const TOKEN_SCOPES: &[&str] = &["write:repository", "write:issue", "read:user"];
-
 pub struct Forgejo {
     api: forgejo_api::Forgejo,
     url: Url,
@@ -38,17 +38,13 @@ impl Forgejo {
     }
 
     async fn token_api(&self) -> Result<forgejo_api::Forgejo> {
-        let me = self.me().await?;
+        let username = self.me().await?;
         let password = self.password.as_deref().ok_or_else(|| {
-            Error::Forge(
-                "forge.password_env must be set to mint per-turn tokens \
-                 (Forgejo's token API rejects token auth)"
-                    .into(),
-            )
+            Error::Forge("the forge account password is unavailable for token management".into())
         })?;
         forgejo_api::Forgejo::new(
             Auth::Password {
-                username: &me,
+                username: &username,
                 password,
                 mfa: None,
             },
@@ -146,13 +142,12 @@ impl Forgejo {
     }
 }
 
-#[async_trait]
-impl Forge for Forgejo {
-    async fn whoami(&self) -> Result<String> {
+impl Forgejo {
+    pub async fn whoami(&self) -> Result<String> {
         self.me().await
     }
 
-    async fn ensure_fork(&self, repo: &RepoId) -> Result<RepoId> {
+    pub async fn ensure_fork(&self, repo: &RepoId) -> Result<RepoId> {
         let me = self.me().await?;
         if repo.owner == me {
             return Ok(repo.clone());
@@ -174,7 +169,7 @@ impl Forge for Forgejo {
         }
     }
 
-    async fn context(&self, thread: &ThreadKey) -> Result<Value> {
+    pub async fn context(&self, thread: &ThreadKey) -> Result<Value> {
         let (owner, name) = own(&thread.repo);
         let (Subject::Issue(number) | Subject::Pr(number)) = thread.subject;
         let issue = go(self.api.issue_get_issue(owner, name, number as i64)).await?;
@@ -234,7 +229,7 @@ impl Forge for Forgejo {
         Ok(context)
     }
 
-    async fn search_issues(&self, repo: &RepoId, query: &str) -> Result<Vec<IssueSummary>> {
+    pub async fn search_issues(&self, repo: &RepoId, query: &str) -> Result<Vec<IssueSummary>> {
         let (owner, name) = own(repo);
         let options = IssueListIssuesQuery {
             q: Some(query.into()),
@@ -259,26 +254,28 @@ impl Forge for Forgejo {
                 })
                 .collect();
         }
-        Ok(issues
+        issues
             .iter()
-            .map(|issue| IssueSummary {
-                number: num(issue.number),
-                title: text(&issue.title),
-                state: match issue.state {
-                    Some(StateType::Closed) => "closed",
-                    _ => "open",
-                }
-                .into(),
-                url: issue
-                    .html_url
-                    .as_ref()
-                    .map(Url::to_string)
-                    .unwrap_or_default(),
+            .map(|issue| {
+                Ok(IssueSummary {
+                    number: required_num(issue.number, "issue number")?,
+                    title: text(&issue.title),
+                    state: match issue.state {
+                        Some(StateType::Closed) => "closed",
+                        _ => "open",
+                    }
+                    .into(),
+                    url: issue
+                        .html_url
+                        .as_ref()
+                        .map(Url::to_string)
+                        .unwrap_or_default(),
+                })
             })
-            .collect())
+            .collect()
     }
 
-    async fn create_pr(&self, repo: &RepoId, pr: NewPr) -> Result<u64> {
+    pub async fn create_pr(&self, repo: &RepoId, pr: NewPr) -> Result<u64> {
         let (owner, name) = own(repo);
         let base = text(&go(self.api.repo_get(owner, name)).await?.default_branch);
         let me = self.me().await?;
@@ -293,14 +290,20 @@ impl Forge for Forgejo {
             "head": head,
             "base": base,
         }));
-        Ok(num(go(self
-            .api
-            .repo_create_pull_request(owner, name, options))
-        .await?
-        .number))
+        required_num(
+            go(self.api.repo_create_pull_request(owner, name, options))
+                .await?
+                .number,
+            "pull request number",
+        )
     }
 
-    async fn comment(&self, thread: &ThreadKey, body: &str, reply_to: Option<u64>) -> Result<u64> {
+    pub async fn comment(
+        &self,
+        thread: &ThreadKey,
+        body: &str,
+        reply_to: Option<u64>,
+    ) -> Result<u64> {
         let (owner, name) = own(&thread.repo);
         let (Subject::Issue(number) | Subject::Pr(number)) = thread.subject;
         let number = number as i64;
@@ -333,7 +336,7 @@ impl Forge for Forgejo {
                     .api
                     .repo_create_pull_review_comment(owner, name, number, review_id, options))
                 .await?;
-                return Ok(num(reply.id));
+                return required_num(reply.id, "review comment id");
             }
         }
         Err(Error::Forge(format!(
@@ -341,7 +344,7 @@ impl Forge for Forgejo {
         )))
     }
 
-    async fn submit_review(&self, repo: &RepoId, pr: u64, review: Review) -> Result<()> {
+    pub async fn submit_review(&self, repo: &RepoId, pr: u64, review: Review) -> Result<()> {
         let (owner, name) = own(repo);
         let event = match review.verdict {
             Verdict::Approve => "APPROVED",
@@ -370,23 +373,70 @@ impl Forge for Forgejo {
         .await?;
         Ok(())
     }
+}
+
+#[async_trait]
+impl Forge for Forgejo {
+    fn with_token(&self, token: &str) -> Result<std::sync::Arc<dyn Forge>> {
+        Ok(std::sync::Arc::new(Forgejo::new(
+            self.url.clone(),
+            token,
+            None,
+        )?))
+    }
+
+    async fn whoami(&self) -> Result<String> {
+        Forgejo::whoami(self).await
+    }
+
+    async fn context(&self, thread: &ThreadKey) -> Result<Value> {
+        Forgejo::context(self, thread).await
+    }
+
+    async fn ensure_fork(&self, repo: &RepoId) -> Result<RepoId> {
+        Forgejo::ensure_fork(self, repo).await
+    }
+
+    async fn search_issues(&self, repo: &RepoId, query: &str) -> Result<Vec<IssueSummary>> {
+        Forgejo::search_issues(self, repo, query).await
+    }
+
+    async fn create_pr(&self, repo: &RepoId, pr: NewPr) -> Result<u64> {
+        Forgejo::create_pr(self, repo, pr).await
+    }
+
+    async fn comment(&self, thread: &ThreadKey, body: &str, reply_to: Option<u64>) -> Result<u64> {
+        Forgejo::comment(self, thread, body, reply_to).await
+    }
+
+    async fn submit_review(&self, repo: &RepoId, pr: u64, review: Review) -> Result<()> {
+        Forgejo::submit_review(self, repo, pr, review).await
+    }
 
     async fn mint_token(&self, label: &str) -> Result<ScopedToken> {
-        let me = self.me().await?;
+        let username = self.me().await?;
         let options = args(json!({"name": label, "scopes": TOKEN_SCOPES}));
-        let token = go(self.token_api().await?.user_create_token(&me, options)).await?;
-        Ok(ScopedToken {
-            id: token.id.unwrap_or_default(),
-            secret: token.sha1.unwrap_or_default(),
-        })
+        let token = go(self
+            .token_api()
+            .await?
+            .user_create_token(&username, options))
+        .await?;
+        let id = token
+            .id
+            .ok_or_else(|| Error::Forge("token response missing id".into()))?;
+        let secret = token
+            .sha1
+            .filter(|secret| !secret.is_empty())
+            .ok_or_else(|| Error::Forge("token response missing secret".into()))?;
+        Ok(ScopedToken { id, secret })
     }
 
     async fn revoke_token(&self, token: &ScopedToken) -> Result<()> {
-        let me = self.me().await?;
+        let username = self.me().await?;
         go(self
             .token_api()
             .await?
-            .user_delete_access_token(&me, &token.id.to_string()))
+            .user_delete_access_token(&username, &token.id.to_string()))
         .await
     }
 }

@@ -37,6 +37,65 @@ pub enum TriggerFilter {
 }
 
 impl TriggerRule {
+    pub fn validate_all(rules: &[Self]) -> Result<()> {
+        if rules.len() > 64 {
+            return Err(config_error("at most 64 trigger rules are allowed"));
+        }
+        for rule in rules {
+            let fields = match rule.on.as_str() {
+                "comment.created" => &["mentions", "assignees", "author", "body"][..],
+                // `assignee` was emitted by an older editor. Keep it as an
+                // alias so persisted configurations continue to work.
+                "issue.assigned" => &["assignees", "assignee", "author"],
+                "pull_request.review_requested" => &["reviewer", "author"],
+                "pull_request.changes_requested" => &["reviewer", "body"],
+                "ci.run_completed" => &["conclusion", "pr_author", "workflow"],
+                "pull_request.opened" => &["author"],
+                _ => return Err(config_error(format!("unknown trigger event: {}", rule.on))),
+            };
+            let clauses: &[BTreeMap<String, String>] = match &rule.filter {
+                TriggerFilter::Any => &[],
+                TriggerFilter::One(clause) => std::slice::from_ref(clause),
+                TriggerFilter::Or(clauses) => clauses,
+            };
+            if clauses.len() > 16 {
+                return Err(config_error(format!(
+                    "trigger {} has more than 16 filter groups",
+                    rule.on
+                )));
+            }
+            for clause in clauses {
+                if clause.is_empty() {
+                    return Err(config_error(format!(
+                        "trigger {} has an empty filter group",
+                        rule.on
+                    )));
+                }
+                if clause.len() > 16 {
+                    return Err(config_error(format!(
+                        "trigger {} has more than 16 conditions",
+                        rule.on
+                    )));
+                }
+                for (field, pattern) in clause {
+                    if !fields.contains(&field.as_str()) {
+                        return Err(config_error(format!(
+                            "unknown field {field} for trigger {}",
+                            rule.on
+                        )));
+                    }
+                    if pattern.is_empty() || pattern == "!" {
+                        return Err(config_error(format!(
+                            "empty pattern for {field} in trigger {}",
+                            rule.on
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn matches(&self, event: &ForgeEvent, bot_user: &str) -> bool {
         let matches_clause = |clause: &BTreeMap<String, String>| {
             clause.iter().all(|(field, pattern)| {
@@ -45,9 +104,14 @@ impl TriggerRule {
                     None => (true, pattern.as_str()),
                 };
                 let pattern = if pattern == "@me" { bot_user } else { pattern };
+                let payload_field = if self.on == "issue.assigned" && field == "assignee" {
+                    "assignees"
+                } else {
+                    field
+                };
                 let matched = event
                     .payload
-                    .get(field)
+                    .get(payload_field)
                     .is_some_and(|value| matches_value(value, pattern));
                 matched == wanted
             })
@@ -60,6 +124,10 @@ impl TriggerRule {
                 TriggerFilter::Or(clauses) => clauses.iter().any(matches_clause),
             }
     }
+}
+
+fn config_error(message: impl Into<String>) -> forgeclaw_core::Error {
+    forgeclaw_core::Error::Config(message.into())
 }
 
 fn matches_value(value: &Value, pattern: &str) -> bool {
@@ -95,17 +163,20 @@ pub trait Gateway: Send + Sync {
 #[derive(Debug)]
 pub struct OpenClawCli {
     program: PathBuf,
+    secret_envs: Vec<String>,
 }
 
 impl OpenClawCli {
-    pub fn new(program: impl Into<PathBuf>) -> Self {
+    pub fn new(program: impl Into<PathBuf>, secret_envs: Vec<String>) -> Self {
         Self {
             program: program.into(),
+            secret_envs,
         }
     }
 
     async fn run(&self, session_key: &str, message: &str) -> Result<()> {
-        let status = tokio::process::Command::new(&self.program)
+        let mut command = tokio::process::Command::new(&self.program);
+        command
             .args([
                 "agent",
                 "--agent",
@@ -116,9 +187,11 @@ impl OpenClawCli {
                 message,
                 "--json",
             ])
-            .stdout(Stdio::null())
-            .status()
-            .await?;
+            .stdout(Stdio::null());
+        for name in &self.secret_envs {
+            command.env_remove(name);
+        }
+        let status = command.status().await?;
         if status.success() {
             Ok(())
         } else {
@@ -180,7 +253,7 @@ where
 
     pub async fn deliver(&self, events: Vec<ForgeEvent>) -> Result<Routed> {
         let bot_user = self.forge.whoami().await?;
-        let mut sessions = 0;
+        let mut turns: Vec<(ThreadKey, Vec<String>)> = Vec::new();
         for event in events {
             let matched = self
                 .rules
@@ -191,8 +264,18 @@ where
             if !matched {
                 continue;
             }
-            self.run_event(&event).await?;
-            sessions += 1;
+            let thread = event.thread();
+            if let Some((_, kinds)) = turns.iter_mut().find(|(key, _)| *key == thread) {
+                if !kinds.contains(&event.kind) {
+                    kinds.push(event.kind);
+                }
+            } else {
+                turns.push((thread, vec![event.kind]));
+            }
+        }
+        let sessions = turns.len();
+        for (thread, kinds) in turns {
+            self.run_turn(thread, kinds).await?;
         }
         Ok(if sessions == 0 {
             Routed::Ignored
@@ -201,8 +284,8 @@ where
         })
     }
 
-    async fn run_event(&self, event: &ForgeEvent) -> Result<()> {
-        let session_key = session_key(&self.forge_name, &event.repo, &event.thread());
+    async fn run_turn(&self, thread: ThreadKey, kinds: Vec<String>) -> Result<()> {
+        let session_key = session_key(&self.forge_name, &thread.repo, &thread);
         let key = SessionKey::new(session_key.clone());
         let turn_lock = {
             let mut locks = self.turn_locks.lock().await;
@@ -216,10 +299,11 @@ where
             }
         };
         let _turn = turn_lock.lock().await;
+        let token = self.forge.mint_token(&session_key).await?;
         self.grants
-            .insert(key.clone(), event.thread(), self.grant_ttl);
+            .insert(key.clone(), thread.clone(), token, self.grant_ttl);
         let message = format!(
-            "Triggered forge event {} on {}. This is a forge-triggered turn, not an ad-hoc \
+            "Triggered forge event(s) {} on {}. This is a forge-triggered turn, not an ad-hoc \
              question. Act now according to the forgeclaw skill using the forge tools. Read the \
              exact subject first. For a mentioned question, post exactly one direct answer on \
              that subject. For requested code work, make the change, push a branch, open a pull \
@@ -227,12 +311,15 @@ where
              inspect the diff and submit the review. For failed CI or requested changes, fix and \
              push the existing branch only when forge_read says its head_owner is your forge \
              username; never open a replacement PR. Do not only describe what you would do.",
-            event.kind,
-            event.thread()
+            kinds.join(", "),
+            thread
         );
         let submit = self.gateway.submit(&session_key, &message).await;
-        self.grants.remove(&key);
-        let revoke = self.forge.revoke_token(&token).await;
+        let grant = self
+            .grants
+            .take(&key)
+            .expect("router inserted the active grant for this session");
+        let revoke = self.forge.revoke_token(grant.token()).await;
         submit?;
         revoke
     }
@@ -290,6 +377,20 @@ mod tests {
     }
 
     #[test]
+    fn legacy_assignee_filter_matches_normalized_assignees() {
+        let rule = TriggerRule {
+            on: "issue.assigned".into(),
+            enabled: true,
+            filter: TriggerFilter::One(BTreeMap::from([("assignee".into(), "@me".into())])),
+        };
+        let mut event = event(json!({"assignees": ["forgeclaw"]}));
+        event.kind = "issue.assigned".into();
+
+        TriggerRule::validate_all(std::slice::from_ref(&rule)).unwrap();
+        assert!(rule.matches(&event, "forgeclaw"));
+    }
+
+    #[test]
     fn alternative_filter_groups_and_enabled_state_are_preserved() {
         let rule: TriggerRule = serde_json::from_value(json!({
             "on": "comment.created",
@@ -314,6 +415,27 @@ mod tests {
     }
 
     #[test]
+    fn trigger_validation_rejects_names_the_normalizer_cannot_emit() {
+        let unknown_event: TriggerRule =
+            serde_json::from_value(json!({"on": "issue.closed"})).unwrap();
+        assert!(TriggerRule::validate_all(&[unknown_event]).is_err());
+
+        let unknown_field: TriggerRule = serde_json::from_value(json!({
+            "on": "comment.created",
+            "filter": {"typo": "@me"}
+        }))
+        .unwrap();
+        assert!(TriggerRule::validate_all(&[unknown_field]).is_err());
+
+        let empty_group: TriggerRule = serde_json::from_value(json!({
+            "on": "comment.created",
+            "filter": {}
+        }))
+        .unwrap();
+        assert!(TriggerRule::validate_all(&[empty_group]).is_err());
+    }
+
+    #[test]
     fn session_key_is_stable_and_names_the_exact_subject() {
         let thread = ThreadKey {
             repo: "octo/repo".parse().unwrap(),
@@ -325,7 +447,7 @@ mod tests {
         );
     }
 
-    #[derive(Clone)]
+    #[derive(Clone, Default)]
     struct FakeForge {
         minted: Arc<AtomicUsize>,
         revoked: Arc<AtomicUsize>,
@@ -341,7 +463,7 @@ mod tests {
             self.minted.fetch_add(1, Ordering::SeqCst);
             Ok(ScopedToken {
                 id: 1,
-                secret: "scoped".into(),
+                secret: "disposable".into(),
             })
         }
 
@@ -376,20 +498,17 @@ mod tests {
                 !self
                     .grants
                     .can_write(&SessionKey::new(session_key), &self.thread),
-                "the zero-TTL grant is expired and removed during the turn"
+                "the zero-TTL grant must not authorize the turn"
             );
             Ok(())
         }
     }
 
     #[tokio::test]
-    async fn successful_event_is_submitted_and_revoked() {
-        let minted = Arc::new(AtomicUsize::new(0));
-        let revoked = Arc::new(AtomicUsize::new(0));
-        let forge = FakeForge {
-            minted: minted.clone(),
-            revoked: revoked.clone(),
-        };
+    async fn successful_event_is_submitted_and_grant_is_removed() {
+        let forge = FakeForge::default();
+        let minted = forge.minted.clone();
+        let revoked = forge.revoked.clone();
         let gateway = FakeGateway::default();
         let submitted = gateway.submitted.clone();
         let router = Router::new(
@@ -412,18 +531,13 @@ mod tests {
                 .unwrap(),
             Routed::Engaged { sessions: 1 }
         );
-        for counter in [submitted, minted, revoked] {
-            assert_eq!(counter.load(Ordering::SeqCst), 1);
-        }
-        assert!(
-            router
-                .grants()
-                .authorized_token(
-                    &SessionKey::new("agent:main:forgeclaw:forgejo/octo/repo#issue/7"),
-                    &event(json!({})).thread(),
-                )
-                .is_none()
-        );
+        assert_eq!(submitted.load(Ordering::SeqCst), 1);
+        assert_eq!(minted.load(Ordering::SeqCst), 1);
+        assert_eq!(revoked.load(Ordering::SeqCst), 1);
+        assert!(!router.grants().can_write(
+            &SessionKey::new("agent:main:forgeclaw:forgejo/octo/repo#issue/7"),
+            &event(json!({})).thread(),
+        ));
     }
 
     #[tokio::test]
@@ -431,7 +545,7 @@ mod tests {
         let grants = Arc::new(GrantStore::default());
         let current = event(json!({"mentions": ["forgeclaw"]}));
         let router = Router::new(
-            FakeForge,
+            FakeForge::default(),
             ExpiringGateway {
                 grants: grants.clone(),
                 thread: current.thread(),
@@ -450,5 +564,44 @@ mod tests {
             router.deliver(vec![current]).await.unwrap(),
             Routed::Engaged { sessions: 1 }
         );
+    }
+
+    #[tokio::test]
+    async fn matching_events_for_one_thread_start_one_turn() {
+        let forge = FakeForge::default();
+        let minted = forge.minted.clone();
+        let gateway = FakeGateway::default();
+        let submitted = gateway.submitted.clone();
+        let router = Router::new(
+            forge,
+            gateway,
+            "forgejo",
+            vec![
+                TriggerRule {
+                    on: "pull_request.opened".into(),
+                    enabled: true,
+                    filter: TriggerFilter::Any,
+                },
+                TriggerRule {
+                    on: "comment.created".into(),
+                    enabled: true,
+                    filter: TriggerFilter::One(BTreeMap::from([("mentions".into(), "@me".into())])),
+                },
+            ],
+            Arc::new(GrantStore::default()),
+            Duration::from_secs(60),
+        );
+        let mut opened = event(json!({"author": "alice"}));
+        opened.kind = "pull_request.opened".into();
+        opened.subject = Subject::Pr(7);
+        let mut mentioned = event(json!({"mentions": ["forgeclaw"]}));
+        mentioned.subject = Subject::Pr(7);
+
+        assert_eq!(
+            router.deliver(vec![opened, mentioned]).await.unwrap(),
+            Routed::Engaged { sessions: 1 }
+        );
+        assert_eq!(submitted.load(Ordering::SeqCst), 1);
+        assert_eq!(minted.load(Ordering::SeqCst), 1);
     }
 }

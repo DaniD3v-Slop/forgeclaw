@@ -18,8 +18,8 @@
           "forge": {
             "url": "http://forgejo:3000/",
             "token_env": "FORGECLAW_FORGE_TOKEN",
-            "webhook_secret_env": "FORGECLAW_WEBHOOK_SECRET",
-            "password_env": "FORGECLAW_FORGE_PASSWORD"
+            "password_env": "FORGECLAW_FORGE_PASSWORD",
+            "webhook_secret_env": "FORGECLAW_WEBHOOK_SECRET"
           },
           "trigger": [
             { "on": "comment.created", "filter": { "mentions": "@me", "author": "!@me" } },

@@ -9,10 +9,6 @@ workspace = true
 
 [dependencies]
 async-trait.workspace = true
-schemars = { version = "1", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror = "2.0.20"
-
-[features]
-schemars = ["dep:schemars"]
