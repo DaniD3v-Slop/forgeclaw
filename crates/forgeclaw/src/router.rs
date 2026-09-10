@@ -7,7 +7,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use forgeclaw_core::{ForgeEvent, RepoId, Result, ScopedToken, ThreadKey};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::sync::{Mutex, RwLock};
 
 use crate::grants::{GrantStore, SessionKey};
@@ -192,6 +192,9 @@ impl OpenClawCli {
             command.env_remove(name);
         }
         let status = command.status().await?;
+        if let Err(error) = self.group_session(session_key).await {
+            eprintln!("could not group OpenClaw session: {error}");
+        }
         if status.success() {
             Ok(())
         } else {
@@ -200,6 +203,36 @@ impl OpenClawCli {
             )))
         }
     }
+
+    async fn group_session(&self, session_key: &str) -> Result<()> {
+        let params = session_group_params(session_key);
+        let mut command = tokio::process::Command::new(&self.program);
+        command
+            .args([
+                "gateway",
+                "call",
+                "sessions.patch",
+                "--params",
+                &params,
+                "--json",
+            ])
+            .stdout(Stdio::null());
+        for name in &self.secret_envs {
+            command.env_remove(name);
+        }
+        let status = command.status().await?;
+        status.success().then_some(()).ok_or_else(|| {
+            forgeclaw_core::Error::Forge(format!("OpenClaw session grouping exited with {status}"))
+        })
+    }
+}
+
+fn session_group_params(session_key: &str) -> String {
+    json!({
+        "key": session_key,
+        "category": "ForgeClaw",
+    })
+    .to_string()
 }
 
 #[async_trait]
@@ -445,6 +478,16 @@ mod tests {
             session_key("forgejo", &thread.repo, &thread),
             "agent:main:forgeclaw:forgejo/octo/repo#issue/7"
         );
+    }
+
+    #[test]
+    fn forge_sessions_are_grouped_with_structured_json() {
+        let params: Value = serde_json::from_str(&session_group_params(
+            "agent:main:forgeclaw:forgejo/o/r#issue/7",
+        ))
+        .unwrap();
+        assert_eq!(params["key"], "agent:main:forgeclaw:forgejo/o/r#issue/7");
+        assert_eq!(params["category"], "ForgeClaw");
     }
 
     #[derive(Clone, Default)]
