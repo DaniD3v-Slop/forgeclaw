@@ -1,0 +1,23 @@
+[package]
+name = "forgeclaw-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono = { version = "0.4.45", features = ["serde"] }
+humantime-serde = "1.1.1"
+minijinja = "2.24.0"
+schemars = { version = "1", optional = true }
+serde.workspace = true
+serde_json.workspace = true
+thiserror = "2.0.20"
+tokio.workspace = true
+toml = "1.1.4"
+
+[features]
+schemars = ["dep:schemars"]
