@@ -159,6 +159,7 @@ pub struct Router<F, G> {
     grants: Arc<GrantStore>,
     grant_ttl: Duration,
     seen: Mutex<HashSet<String>>,
+    turn_lock: Mutex<()>,
 }
 
 impl<F, G> Router<F, G>
@@ -182,6 +183,7 @@ where
             grants,
             grant_ttl,
             seen: Mutex::new(HashSet::new()),
+            turn_lock: Mutex::new(()),
         }
     }
 
