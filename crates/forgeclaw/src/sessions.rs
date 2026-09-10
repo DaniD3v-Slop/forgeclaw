@@ -9,8 +9,8 @@ use crate::grants::SessionKey;
 
 /// Resolves an MCP turn id to the OpenClaw session key that owns it.
 ///
-/// OpenClaw writes this relationship in `session.started` runtime events. The
-/// daemon is only a reader; it does not create or modify gateway state.
+/// OpenClaw writes this relationship in runtime events. The daemon is only a
+/// reader; it does not create or modify gateway state.
 #[derive(Debug)]
 pub struct SessionResolver {
     database: PathBuf,
@@ -47,6 +47,34 @@ impl SessionResolver {
         }
         Ok(session)
     }
+
+    pub fn has_session(&self, session_key: &str) -> Result<bool, rusqlite::Error> {
+        let connection = Connection::open_with_flags(
+            &self.database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        let mut statement = connection.prepare(
+            "SELECT event_json
+             FROM trajectory_runtime_events
+             WHERE event_json LIKE '%' || ?1 || '%'
+             ORDER BY rowid DESC",
+        )?;
+        let events = statement.query_map([session_key], |row| row.get::<_, String>(0))?;
+        for event in events {
+            let value: Value = match serde_json::from_str(&event?) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            let stored = value
+                .get("sessionKey")
+                .or_else(|| value.get("data").and_then(|data| data.get("sessionKey")))
+                .and_then(Value::as_str);
+            if stored == Some(session_key) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 fn find_session_key(database: &Path, turn_id: &str) -> Result<Option<SessionKey>, rusqlite::Error> {
@@ -70,13 +98,17 @@ fn find_session_key(database: &Path, turn_id: &str) -> Result<Option<SessionKey>
 
 fn session_key_from_event(event: &str, turn_id: &str) -> Option<SessionKey> {
     let value: Value = serde_json::from_str(event).ok()?;
-    let is_started = value.get("type").and_then(Value::as_str) == Some("session.started");
     let data = value.get("data");
-    let event_turn = value
-        .get("sessionId")
-        .or_else(|| data.and_then(|data| data.get("threadId")))
-        .and_then(Value::as_str)?;
-    if !is_started || event_turn != turn_id {
+    let matches_gateway_id = [
+        value.get("sessionId"),
+        data.and_then(|data| data.get("threadId")),
+        data.and_then(|data| data.get("turnId")),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(Value::as_str)
+    .any(|candidate| candidate == turn_id);
+    if !matches_gateway_id {
         return None;
     }
     value
@@ -110,10 +142,16 @@ mod tests {
     }
 
     #[test]
+    fn accepts_current_openclaw_per_turn_id() {
+        let event = r#"{"type":"tool.call","sessionId":"session-1","sessionKey":"agent:main:forgeclaw/issue-1","data":{"threadId":"thread-1","turnId":"turn-1"}}"#;
+        assert_eq!(
+            session_key_from_event(event, "turn-1"),
+            Some(SessionKey::new("agent:main:forgeclaw/issue-1"))
+        );
+    }
+
+    #[test]
     fn rejects_foreign_or_non_start_events() {
-        let event =
-            r#"{"type":"session.ended","sessionKey":"agent:main:x","data":{"threadId":"turn-1"}}"#;
-        assert_eq!(session_key_from_event(event, "turn-1"), None);
         let event = r#"{"type":"session.started","sessionKey":"agent:main:x","data":{"threadId":"turn-2"}}"#;
         assert_eq!(session_key_from_event(event, "turn-1"), None);
     }
@@ -141,5 +179,7 @@ mod tests {
             resolver.resolve("turn-1").unwrap(),
             Some(SessionKey::new("agent:main:repo#issue/1"))
         );
+        assert!(resolver.has_session("agent:main:repo#issue/1").unwrap());
+        assert!(!resolver.has_session("agent:main:repo#issue/2").unwrap());
     }
 }

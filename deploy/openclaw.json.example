@@ -1,0 +1,32 @@
+{
+  "plugins": {
+    "entries": {
+      "memory-core": {
+        "enabled": false
+      },
+      "forgeclaw": {
+        "enabled": true,
+        "config": {
+          "listen": "0.0.0.0:3080",
+          "daemon_url": "http://forgeclaw:3080",
+          "workspace": "/workspace",
+          "grant_ttl_secs": 900,
+          "authorization_env": "FORGECLAW_MCP_AUTHORIZATION",
+          "forge": {
+            "url": "http://forgejo:3000/",
+            "token_env": "FORGECLAW_FORGE_TOKEN",
+            "webhook_secret_env": "FORGECLAW_WEBHOOK_SECRET",
+            "password_env": "FORGECLAW_FORGE_PASSWORD"
+          },
+          "trigger": [
+            { "on": "comment.created", "filter": { "mentions": "@me", "author": "!@me" } },
+            { "on": "issue.assigned", "filter": { "assignee": "@me" } },
+            { "on": "pull_request.review_requested", "filter": { "reviewer": "@me" } },
+            { "on": "pull_request.changes_requested", "filter": { "reviewer": "!@me" } },
+             { "on": "ci.run_completed", "filter": { "conclusion": "failure", "pr_author": "@me" } }
+          ]
+        }
+      }
+    }
+  }
+}

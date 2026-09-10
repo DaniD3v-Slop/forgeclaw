@@ -1,5 +1,6 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -85,6 +86,7 @@ pub trait WebhookForge: Send + Sync {
     async fn whoami(&self) -> Result<String>;
     async fn mint_token(&self, label: &str) -> Result<ScopedToken>;
     async fn revoke_token(&self, token: &ScopedToken) -> Result<()>;
+    async fn ack(&self, event: &ForgeEvent) -> Result<()>;
 }
 
 /// Starts an OpenClaw turn. Its implementation is intentionally the only
@@ -97,7 +99,7 @@ pub trait Gateway: Send + Sync {
 /// Gateway submission through the supported OpenClaw CLI. The daemon image is
 /// based on the gateway image, so this command uses the same persisted config
 /// and agent database as the long-lived gateway service.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct OpenClawCli {
     program: PathBuf,
 }
@@ -108,11 +110,8 @@ impl OpenClawCli {
             program: program.into(),
         }
     }
-}
 
-#[async_trait]
-impl Gateway for OpenClawCli {
-    async fn submit(&self, session_key: &str, message: &str) -> Result<()> {
+    async fn run(&self, session_key: &str, message: &str) -> Result<()> {
         let status = tokio::process::Command::new(&self.program)
             .args([
                 "agent",
@@ -124,6 +123,7 @@ impl Gateway for OpenClawCli {
                 message,
                 "--json",
             ])
+            .stdout(Stdio::null())
             .status()
             .await?;
         if status.success() {
@@ -136,6 +136,12 @@ impl Gateway for OpenClawCli {
     }
 }
 
+#[async_trait]
+impl Gateway for OpenClawCli {
+    async fn submit(&self, session_key: &str, message: &str) -> Result<()> {
+        self.run(session_key, message).await
+    }
+}
 /// The outcome of accepting one delivery. It is useful for HTTP status/logging
 /// but contains no token or prompt content.
 #[derive(Debug, PartialEq, Eq)]
@@ -152,6 +158,7 @@ pub struct Router<F, G> {
     rules: RwLock<Vec<TriggerRule>>,
     grants: Arc<GrantStore>,
     grant_ttl: Duration,
+    seen: Mutex<HashSet<String>>,
 }
 
 impl<F, G> Router<F, G>
@@ -174,6 +181,7 @@ where
             rules: RwLock::new(rules),
             grants,
             grant_ttl,
+            seen: Mutex::new(HashSet::new()),
         }
     }
 
@@ -194,7 +202,14 @@ where
             if !matched {
                 continue;
             }
-            self.run_event(&event).await?;
+            let event_key = format!("{}:{}:{}", event.kind, event.thread(), event.event_id);
+            if !self.seen.lock().await.insert(event_key.clone()) {
+                continue;
+            }
+            if let Err(error) = self.run_event(&event).await {
+                self.seen.lock().await.remove(&event_key);
+                return Err(error);
+            }
             sessions += 1;
         }
         Ok(if sessions == 0 {
@@ -211,17 +226,30 @@ where
         self.grants
             .insert(key.clone(), event.thread(), token, self.grant_ttl);
         let message = format!(
-            "Forge event {} on {}; act according to your forgeclaw skill.",
+            "Triggered forge event {} on {}. This is a forge-triggered turn, not an ad-hoc \
+             question. Act now according to the forgeclaw skill using the forge tools. Read the \
+             exact subject first. For a mentioned question, post exactly one direct answer on \
+             that subject. For requested code work, make the change, push a branch, open a pull \
+             request, then post exactly one informative subject comment. For a review request, \
+             inspect the diff and submit the review. For failed CI or requested changes, fix and \
+             push the existing branch only when forge_read says its head_owner is your forge \
+             username; never open a replacement PR. Do not only describe what you would do.",
             event.kind,
             event.thread()
         );
         let submit = self.gateway.submit(&session_key, &message).await;
+        let ack = if submit.is_ok() {
+            self.forge.ack(event).await
+        } else {
+            Ok(())
+        };
         let token = self
             .grants
             .take(&key)
             .expect("router inserted the active grant for this session");
         let revoke = self.forge.revoke_token(token.token()).await;
         submit?;
+        ack?;
         revoke
     }
 
@@ -242,6 +270,8 @@ pub fn session_key(forge: &str, repo: &RepoId, thread: &ThreadKey) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use forgeclaw_core::Subject;
     use serde_json::json;
@@ -311,5 +341,110 @@ mod tests {
             session_key("forgejo", &thread.repo, &thread),
             "agent:main:forgeclaw:forgejo/octo/repo#issue/7"
         );
+    }
+
+    #[derive(Clone)]
+    struct FakeForge {
+        event: ForgeEvent,
+        minted: Arc<AtomicUsize>,
+        revoked: Arc<AtomicUsize>,
+        acked: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl WebhookForge for FakeForge {
+        async fn verify_and_thread(
+            &self,
+            _signature: &str,
+            _body: &[u8],
+        ) -> Result<Option<ThreadKey>> {
+            Ok(Some(self.event.thread()))
+        }
+
+        async fn events_for_thread(
+            &self,
+            _bot_user: &str,
+            _thread: &ThreadKey,
+        ) -> Result<Vec<ForgeEvent>> {
+            Ok(vec![self.event.clone()])
+        }
+
+        async fn whoami(&self) -> Result<String> {
+            Ok("forgeclaw".into())
+        }
+
+        async fn mint_token(&self, _label: &str) -> Result<ScopedToken> {
+            self.minted.fetch_add(1, Ordering::SeqCst);
+            Ok(ScopedToken {
+                id: 1,
+                secret: "scoped".into(),
+            })
+        }
+
+        async fn revoke_token(&self, _token: &ScopedToken) -> Result<()> {
+            self.revoked.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn ack(&self, _event: &ForgeEvent) -> Result<()> {
+            self.acked.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeGateway {
+        submitted: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Gateway for FakeGateway {
+        async fn submit(&self, _session_key: &str, _message: &str) -> Result<()> {
+            self.submitted.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn successful_event_is_submitted_acked_revoked_and_deduplicated() {
+        let minted = Arc::new(AtomicUsize::new(0));
+        let revoked = Arc::new(AtomicUsize::new(0));
+        let acked = Arc::new(AtomicUsize::new(0));
+        let forge = FakeForge {
+            event: event(json!({"mentions": ["forgeclaw"], "author": "alice"})),
+            minted: minted.clone(),
+            revoked: revoked.clone(),
+            acked: acked.clone(),
+        };
+        let gateway = FakeGateway::default();
+        let submitted = gateway.submitted.clone();
+        let router = Router::new(
+            forge,
+            gateway,
+            "forgejo",
+            vec![TriggerRule {
+                on: "comment.created".into(),
+                enabled: true,
+                filter: TriggerFilter::One(BTreeMap::from([("mentions".into(), "@me".into())])),
+            }],
+            Arc::new(GrantStore::default()),
+            Duration::from_secs(60),
+        );
+
+        assert_eq!(
+            router.route("signature", b"{}").await.unwrap(),
+            Routed::Engaged { sessions: 1 }
+        );
+        assert_eq!(
+            router.route("signature", b"{}").await.unwrap(),
+            Routed::Ignored
+        );
+        for counter in [submitted, minted, revoked, acked] {
+            assert_eq!(counter.load(Ordering::SeqCst), 1);
+        }
+        assert!(!router.grants().can_write(
+            &SessionKey::new("agent:main:forgeclaw:forgejo/octo/repo#issue/7"),
+            &event(json!({})).thread(),
+        ));
     }
 }
