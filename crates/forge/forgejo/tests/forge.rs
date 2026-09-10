@@ -150,6 +150,81 @@ async fn creates_pull_request_from_bot_fork() {
         .await
         .unwrap();
     assert_eq!(number, 9);
+    let requests = server.received_requests().await.unwrap();
+    let request = requests
+        .iter()
+        .find(|request| request.url.path() == "/api/v1/repos/o/r/pulls")
+        .unwrap();
+    let body: Value = serde_json::from_slice(&request.body).unwrap();
+    assert!(body.get("assignees").is_none_or(|assignees| {
+        assignees.is_null() || assignees.as_array().is_some_and(Vec::is_empty)
+    }));
+}
+
+#[tokio::test]
+async fn pull_request_context_exposes_head_ownership() {
+    let server = MockServer::start().await;
+    mock(
+        &server,
+        "GET",
+        "/api/v1/repos/o/r/issues/7",
+        200,
+        json!({"number": 7, "title": "Change", "state": "open"}),
+    )
+    .await;
+    mock(
+        &server,
+        "GET",
+        "/api/v1/repos/o/r/issues/7/comments",
+        200,
+        json!([]),
+    )
+    .await;
+    mock(
+        &server,
+        "GET",
+        "/api/v1/repos/o/r/pulls/7",
+        200,
+        json!({
+            "number": 7,
+            "requested_reviewers": [],
+            "head": {
+                "ref": "feature",
+                "repo": {"name": "r", "full_name": "alice/r", "owner": {"login": "alice"}}
+            },
+            "base": {"ref": "main"}
+        }),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/o/r/pulls/7.diff"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("diff"))
+        .mount(&server)
+        .await;
+    mock(
+        &server,
+        "GET",
+        "/api/v1/repos/o/r/actions/runs",
+        200,
+        json!({"workflow_runs": []}),
+    )
+    .await;
+    mock(
+        &server,
+        "GET",
+        "/api/v1/repos/o/r/pulls/7/reviews",
+        200,
+        json!([]),
+    )
+    .await;
+
+    let context = client(&server)
+        .context(&thread(Subject::Pr(7)))
+        .await
+        .unwrap();
+    assert_eq!(context["head_owner"], "alice");
+    assert_eq!(context["head_repo"], "alice/r");
+    assert_eq!(context["head_branch"], "feature");
 }
 
 #[tokio::test]

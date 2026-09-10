@@ -35,6 +35,7 @@
         "properties": {
           "url": { "type": "string", "format": "uri" },
           "token_env": { "type": "string" },
+          "password_env": { "type": "string" },
           "webhook_secret_env": { "type": "string" }
         }
       },

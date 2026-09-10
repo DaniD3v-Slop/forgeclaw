@@ -225,6 +225,7 @@ async fn tool_call(
             let branch = string(arguments, "branch")?;
             valid_branch(branch)?;
             let token = require_write(server, session, &thread)?;
+            require_bot_owned_pr(server, &thread).await?;
             let path = server.checkout_path(&thread, true);
             if !path.join(".git").is_dir() {
                 return Err("checkout the authorized subject before pushing".into());
@@ -242,6 +243,46 @@ async fn tool_call(
         other => return Err(format!("unknown forge tool: {other}")),
     };
     Ok(json!({"content": [{"type": "text", "text": text}]}))
+}
+
+fn require_issue_subject(thread: &ThreadKey) -> Result<(), String> {
+    matches!(thread.subject, forgeclaw_core::Subject::Issue(_))
+        .then_some(())
+        .ok_or_else(|| {
+            "new pull requests can only be opened for issue subjects; update the existing pull request branch instead"
+                .into()
+        })
+}
+
+async fn require_bot_owned_pr(server: &ToolServer, thread: &ThreadKey) -> Result<(), String> {
+    if !matches!(thread.subject, forgeclaw_core::Subject::Pr(_)) {
+        return Ok(());
+    }
+    let context = server
+        .forge
+        .context(thread)
+        .await
+        .map_err(|error| error.to_string())?;
+    let bot = server
+        .forge
+        .whoami()
+        .await
+        .map_err(|error| error.to_string())?;
+    require_head_owner(&context, &bot)
+}
+
+fn require_head_owner(context: &Value, bot: &str) -> Result<(), String> {
+    let owner = context
+        .get("head_owner")
+        .and_then(Value::as_str)
+        .filter(|owner| !owner.is_empty())
+        .ok_or("pull request context has no head owner")?;
+    if owner != bot {
+        return Err(format!(
+            "cannot push to this pull request: its head branch is owned by {owner}, not {bot}"
+        ));
+    }
+    Ok(())
 }
 
 fn authorized_token(
