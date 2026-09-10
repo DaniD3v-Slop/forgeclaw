@@ -9,7 +9,7 @@ members = [
 [workspace.package]
 edition = "2024"
 license = "MIT"
-repository = "https://codeberg.org/DaniD3v/forgeclaw"
+repository = "https://github.com/DaniD3v-Slop/forgeclaw"
 
 [workspace.lints.clippy]
 # Do not silence lints: fix them. `#[expect]` needs a reason and is a last resort.

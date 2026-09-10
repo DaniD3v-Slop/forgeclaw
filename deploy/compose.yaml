@@ -11,6 +11,7 @@ services:
       FORGEJO__webhook__ALLOWED_HOST_LIST: "*"
     ports:
       - "127.0.0.1:${FORGEJO_PORT:-3001}:3000"
+      - "127.0.0.1:${FORGEJO_SSH_PORT:-2222}:2222"
     volumes:
       - forgejo_data:/var/lib/gitea
     healthcheck:
@@ -44,7 +45,7 @@ services:
       - ${XDG_RUNTIME_DIR:-/run/user/1000}/podman/podman.sock:/run/user/1000/podman/podman.sock
 
   openclaw-gateway:
-    image: ghcr.io/openclaw/openclaw:2026.8.2-browser
+    image: ghcr.io/openclaw/openclaw:2026.9.5-browser
     command:
       - sh
       - -c

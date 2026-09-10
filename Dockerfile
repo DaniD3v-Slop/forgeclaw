@@ -6,9 +6,10 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates crates
 RUN cargo build --release --locked -p forgeclaw
 
-FROM ghcr.io/openclaw/openclaw:2026.8.2-browser
+FROM ghcr.io/openclaw/openclaw:2026.9.5-browser
 USER root
 COPY --from=build /build/target/release/forgeclaw /usr/local/bin/forgeclaw
+COPY --chown=node:node plugins/forgeclaw /opt/forgeclaw/plugin
 USER node
 HEALTHCHECK --interval=10s --timeout=2s --start-period=5s --retries=5 \
   CMD curl --fail --silent http://localhost:3080/healthz >/dev/null || exit 1

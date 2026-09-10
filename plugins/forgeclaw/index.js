@@ -95,6 +95,20 @@ function object(properties, required) {
   return { type: "object", additionalProperties: false, properties, required };
 }
 
+function takeAuthorization(name) {
+  let cache = globalThis[AUTHORIZATION_CACHE];
+  if (!(cache instanceof Map)) {
+    cache = new Map();
+    Object.defineProperty(globalThis, AUTHORIZATION_CACHE, { value: cache });
+  }
+  const current = process.env[name];
+  if (current) {
+    cache.set(name, current);
+  }
+  delete process.env[name];
+  return cache.get(name);
+}
+
 function createTool(definition, context, config, authorization) {
   return {
     ...definition,
