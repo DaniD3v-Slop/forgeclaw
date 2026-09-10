@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Router, response::IntoResponse};
 use forgeclaw::authorization::ToolAuthorizer;
 use forgeclaw::grants::GrantStore;
@@ -128,16 +128,32 @@ async fn webhook(
     let Some(signature) = headers
         .get("x-forgejo-signature")
         .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
     else {
         return StatusCode::UNAUTHORIZED;
     };
-    match router.route(signature, &body).await {
-        Ok(_) => StatusCode::ACCEPTED,
-        Err(error) => {
-            eprintln!("webhook routing failed: {error}");
-            StatusCode::BAD_REQUEST
+    tokio::spawn(async move {
+        let result = async {
+            let config: OpenClawConfig =
+                serde_json::from_slice(&std::fs::read(&state.config_path)?)
+                    .map_err(|error| forgeclaw_core::Error::Config(error.to_string()))?;
+            let rules = config
+                .forgeclaw()
+                .ok_or_else(|| {
+                    forgeclaw_core::Error::Config(
+                        "plugins.entries.forgeclaw.config is required".into(),
+                    )
+                })?
+                .trigger;
+            state.router.replace_rules(rules).await;
+            state.router.route(&signature, &body).await
         }
-    }
+        .await;
+        if let Err(error) = result {
+            eprintln!("webhook routing failed: {error}");
+        }
+    });
+    StatusCode::ACCEPTED
 }
 
 #[tokio::main]
@@ -182,6 +198,7 @@ async fn main() -> Result<()> {
     )
     .router();
     let app = Router::new()
+        .route("/healthz", get(|| async { StatusCode::OK }))
         .route("/webhook", post(webhook))
         .with_state(WebhookState {
             router,
