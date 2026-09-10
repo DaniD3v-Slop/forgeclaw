@@ -1,7 +1,7 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -77,16 +77,9 @@ fn matches_value(value: &Value, pattern: &str) -> bool {
 /// forge protocol details.
 #[async_trait]
 pub trait WebhookForge: Send + Sync {
-    async fn verify_and_thread(&self, signature: &str, body: &[u8]) -> Result<Option<ThreadKey>>;
-    async fn events_for_thread(
-        &self,
-        bot_user: &str,
-        thread: &ThreadKey,
-    ) -> Result<Vec<ForgeEvent>>;
     async fn whoami(&self) -> Result<String>;
     async fn mint_token(&self, label: &str) -> Result<ScopedToken>;
     async fn revoke_token(&self, token: &ScopedToken) -> Result<()>;
-    async fn ack(&self, event: &ForgeEvent) -> Result<()>;
 }
 
 /// Starts an OpenClaw turn. Its implementation is intentionally the only
@@ -158,8 +151,7 @@ pub struct Router<F, G> {
     rules: RwLock<Vec<TriggerRule>>,
     grants: Arc<GrantStore>,
     grant_ttl: Duration,
-    seen: Mutex<HashSet<String>>,
-    turn_lock: Mutex<()>,
+    turn_locks: Mutex<HashMap<SessionKey, Weak<Mutex<()>>>>,
 }
 
 impl<F, G> Router<F, G>
@@ -182,17 +174,12 @@ where
             rules: RwLock::new(rules),
             grants,
             grant_ttl,
-            seen: Mutex::new(HashSet::new()),
-            turn_lock: Mutex::new(()),
+            turn_locks: Mutex::new(HashMap::new()),
         }
     }
 
-    pub async fn route(&self, signature: &str, body: &[u8]) -> Result<Routed> {
-        let Some(thread) = self.forge.verify_and_thread(signature, body).await? else {
-            return Ok(Routed::Ignored);
-        };
+    pub async fn deliver(&self, events: Vec<ForgeEvent>) -> Result<Routed> {
         let bot_user = self.forge.whoami().await?;
-        let events = self.forge.events_for_thread(&bot_user, &thread).await?;
         let mut sessions = 0;
         for event in events {
             let matched = self
@@ -204,14 +191,7 @@ where
             if !matched {
                 continue;
             }
-            let event_key = format!("{}:{}:{}", event.kind, event.thread(), event.event_id);
-            if !self.seen.lock().await.insert(event_key.clone()) {
-                continue;
-            }
-            if let Err(error) = self.run_event(&event).await {
-                self.seen.lock().await.remove(&event_key);
-                return Err(error);
-            }
+            self.run_event(&event).await?;
             sessions += 1;
         }
         Ok(if sessions == 0 {
@@ -223,10 +203,21 @@ where
 
     async fn run_event(&self, event: &ForgeEvent) -> Result<()> {
         let session_key = session_key(&self.forge_name, &event.repo, &event.thread());
-        let token = self.forge.mint_token(&session_key).await?;
         let key = SessionKey::new(session_key.clone());
+        let turn_lock = {
+            let mut locks = self.turn_locks.lock().await;
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+                lock
+            } else {
+                let lock = Arc::new(Mutex::new(()));
+                locks.insert(key.clone(), Arc::downgrade(&lock));
+                lock
+            }
+        };
+        let _turn = turn_lock.lock().await;
         self.grants
-            .insert(key.clone(), event.thread(), token, self.grant_ttl);
+            .insert(key.clone(), event.thread(), self.grant_ttl);
         let message = format!(
             "Triggered forge event {} on {}. This is a forge-triggered turn, not an ad-hoc \
              question. Act now according to the forgeclaw skill using the forge tools. Read the \
@@ -240,18 +231,9 @@ where
             event.thread()
         );
         let submit = self.gateway.submit(&session_key, &message).await;
-        let ack = if submit.is_ok() {
-            self.forge.ack(event).await
-        } else {
-            Ok(())
-        };
-        let token = self
-            .grants
-            .take(&key)
-            .expect("router inserted the active grant for this session");
-        let revoke = self.forge.revoke_token(token.token()).await;
+        self.grants.remove(&key);
+        let revoke = self.forge.revoke_token(&token).await;
         submit?;
-        ack?;
         revoke
     }
 
@@ -283,8 +265,6 @@ mod tests {
             repo: "octo/repo".parse().unwrap(),
             kind: "comment.created".into(),
             subject: Subject::Issue(7),
-            actor: "alice".into(),
-            event_id: "1".into(),
             payload,
         }
     }
@@ -347,30 +327,12 @@ mod tests {
 
     #[derive(Clone)]
     struct FakeForge {
-        event: ForgeEvent,
         minted: Arc<AtomicUsize>,
         revoked: Arc<AtomicUsize>,
-        acked: Arc<AtomicUsize>,
     }
 
     #[async_trait]
     impl WebhookForge for FakeForge {
-        async fn verify_and_thread(
-            &self,
-            _signature: &str,
-            _body: &[u8],
-        ) -> Result<Option<ThreadKey>> {
-            Ok(Some(self.event.thread()))
-        }
-
-        async fn events_for_thread(
-            &self,
-            _bot_user: &str,
-            _thread: &ThreadKey,
-        ) -> Result<Vec<ForgeEvent>> {
-            Ok(vec![self.event.clone()])
-        }
-
         async fn whoami(&self) -> Result<String> {
             Ok("forgeclaw".into())
         }
@@ -385,11 +347,6 @@ mod tests {
 
         async fn revoke_token(&self, _token: &ScopedToken) -> Result<()> {
             self.revoked.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-
-        async fn ack(&self, _event: &ForgeEvent) -> Result<()> {
-            self.acked.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
@@ -407,16 +364,31 @@ mod tests {
         }
     }
 
+    struct ExpiringGateway {
+        grants: Arc<GrantStore>,
+        thread: ThreadKey,
+    }
+
+    #[async_trait]
+    impl Gateway for ExpiringGateway {
+        async fn submit(&self, session_key: &str, _message: &str) -> Result<()> {
+            assert!(
+                !self
+                    .grants
+                    .can_write(&SessionKey::new(session_key), &self.thread),
+                "the zero-TTL grant is expired and removed during the turn"
+            );
+            Ok(())
+        }
+    }
+
     #[tokio::test]
-    async fn successful_event_is_submitted_acked_revoked_and_deduplicated() {
+    async fn successful_event_is_submitted_and_revoked() {
         let minted = Arc::new(AtomicUsize::new(0));
         let revoked = Arc::new(AtomicUsize::new(0));
-        let acked = Arc::new(AtomicUsize::new(0));
         let forge = FakeForge {
-            event: event(json!({"mentions": ["forgeclaw"], "author": "alice"})),
             minted: minted.clone(),
             revoked: revoked.clone(),
-            acked: acked.clone(),
         };
         let gateway = FakeGateway::default();
         let submitted = gateway.submitted.clone();
@@ -434,19 +406,49 @@ mod tests {
         );
 
         assert_eq!(
-            router.route("signature", b"{}").await.unwrap(),
+            router
+                .deliver(vec![event(json!({"mentions": ["forgeclaw"]}))])
+                .await
+                .unwrap(),
             Routed::Engaged { sessions: 1 }
         );
-        assert_eq!(
-            router.route("signature", b"{}").await.unwrap(),
-            Routed::Ignored
-        );
-        for counter in [submitted, minted, revoked, acked] {
+        for counter in [submitted, minted, revoked] {
             assert_eq!(counter.load(Ordering::SeqCst), 1);
         }
-        assert!(!router.grants().can_write(
-            &SessionKey::new("agent:main:forgeclaw:forgejo/octo/repo#issue/7"),
-            &event(json!({})).thread(),
-        ));
+        assert!(
+            router
+                .grants()
+                .authorized_token(
+                    &SessionKey::new("agent:main:forgeclaw:forgejo/octo/repo#issue/7"),
+                    &event(json!({})).thread(),
+                )
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_expired_grant_is_removed_without_panicking() {
+        let grants = Arc::new(GrantStore::default());
+        let current = event(json!({"mentions": ["forgeclaw"]}));
+        let router = Router::new(
+            FakeForge,
+            ExpiringGateway {
+                grants: grants.clone(),
+                thread: current.thread(),
+            },
+            "forgejo",
+            vec![TriggerRule {
+                on: "comment.created".into(),
+                enabled: true,
+                filter: TriggerFilter::One(BTreeMap::from([("mentions".into(), "@me".into())])),
+            }],
+            grants,
+            Duration::ZERO,
+        );
+
+        assert_eq!(
+            router.deliver(vec![current]).await.unwrap(),
+            Routed::Engaged { sessions: 1 }
+        );
     }
 }

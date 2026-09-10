@@ -1,5 +1,8 @@
 {
   "plugins": {
+    "load": {
+      "paths": ["/home/node/.openclaw/extensions/forgeclaw"]
+    },
     "entries": {
       "memory-core": {
         "enabled": false
@@ -20,10 +23,10 @@
           },
           "trigger": [
             { "on": "comment.created", "filter": { "mentions": "@me", "author": "!@me" } },
-            { "on": "issue.assigned", "filter": { "assignee": "@me" } },
+            { "on": "issue.assigned", "filter": { "assignees": "@me", "author": "!@me" } },
             { "on": "pull_request.review_requested", "filter": { "reviewer": "@me" } },
             { "on": "pull_request.changes_requested", "filter": { "reviewer": "!@me" } },
-             { "on": "ci.run_completed", "filter": { "conclusion": "failure", "pr_author": "@me" } }
+            { "on": "ci.run_completed", "filter": { "conclusion": "failure", "pr_author": "@me" } }
           ]
         }
       }

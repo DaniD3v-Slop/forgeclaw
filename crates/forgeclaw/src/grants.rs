@@ -31,28 +31,8 @@ pub struct Grant {
     expires_at: Instant,
 }
 
-impl std::fmt::Debug for Grant {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Grant")
-            .field("thread", &self.thread)
-            .field("token_id", &self.token.id)
-            .field("expires_at", &self.expires_at)
-            .finish()
-    }
-}
-
-impl Grant {
-    pub fn thread(&self) -> &ThreadKey {
-        &self.thread
-    }
-
-    pub fn token(&self) -> &ScopedToken {
-        &self.token
-    }
-}
-
 /// In-memory authority store shared by the webhook router and tool server.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct GrantStore {
     grants: Mutex<HashMap<SessionKey, Grant>>,
 }
@@ -73,17 +53,8 @@ impl GrantStore {
         self.lock().insert(session, grant);
     }
 
-    /// Removes a grant at turn completion. The returned token is for the
-    /// router to revoke using its privileged forge client.
-    pub fn take(&self, session: &SessionKey) -> Option<Grant> {
-        self.lock().remove(session)
-    }
-
-    /// Returns whether this session may mutate exactly `thread` right now.
-    /// A missing, expired, or mismatched grant is deliberately indistinguishable
-    /// to the caller: all are read-only.
-    pub fn can_write(&self, session: &SessionKey, thread: &ThreadKey) -> bool {
-        self.authorized_token(session, thread).is_some()
+    pub fn remove(&self, session: &SessionKey) {
+        self.lock().remove(session);
     }
 
     /// Returns a scoped credential only after the same exact-subject check
@@ -101,21 +72,6 @@ impl GrantStore {
             return None;
         }
         (grant.thread == *thread).then(|| grant.token.clone())
-    }
-
-    /// Drops expired grants and returns their tokens for revocation.
-    pub fn reap_expired(&self) -> Vec<ScopedToken> {
-        let now = Instant::now();
-        let mut grants = self.lock();
-        let expired = grants
-            .iter()
-            .filter(|(_, grant)| grant.expires_at <= now)
-            .map(|(session, _)| session.clone())
-            .collect::<Vec<_>>();
-        expired
-            .into_iter()
-            .filter_map(|session| grants.remove(&session).map(|grant| grant.token))
-            .collect()
     }
 
     fn lock(&self) -> MutexGuard<'_, HashMap<SessionKey, Grant>> {
@@ -163,13 +119,12 @@ mod tests {
     }
 
     #[test]
-    fn expired_grant_is_read_only_and_reaped() {
+    fn expired_grant_is_removed() {
         let store = GrantStore::default();
         let session = SessionKey::new("session-a");
         store.insert(session.clone(), thread(1), token(), Duration::ZERO);
 
         assert!(!store.can_write(&session, &thread(1)));
-        assert!(store.take(&session).is_none());
     }
 
     #[test]
@@ -178,8 +133,7 @@ mod tests {
         let session = SessionKey::new("session-a");
         store.insert(session.clone(), thread(1), token(), Duration::from_secs(60));
 
-        let grant = store.take(&session).expect("active grant");
-        assert_eq!(grant.thread(), &thread(1));
+        store.remove(&session);
         assert!(!store.can_write(&session, &thread(1)));
     }
 }

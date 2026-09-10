@@ -11,12 +11,11 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Router, response::IntoResponse};
-use forgeclaw::authorization::ToolAuthorizer;
 use forgeclaw::grants::GrantStore;
 use forgeclaw::http_tools::ToolServer;
 use forgeclaw::router::{OpenClawCli, Router as ForgeRouter, TriggerRule, WebhookForge};
-use forgeclaw_core::{Forge, ForgeEvent, Result, ScopedToken, ThreadKey};
-use forgeclaw_forgejo::{Forgejo, webhook_thread};
+use forgeclaw_core::Result;
+use forgeclaw_forgejo::{Forgejo, webhook_events};
 use serde::Deserialize;
 use url::Url;
 
@@ -78,23 +77,10 @@ struct ForgeConfig {
 
 struct ForgejoWebhook {
     forge: Arc<Forgejo>,
-    secret: String,
 }
 
 #[async_trait]
 impl WebhookForge for ForgejoWebhook {
-    async fn verify_and_thread(&self, signature: &str, body: &[u8]) -> Result<Option<ThreadKey>> {
-        webhook_thread(signature, &self.secret, body)
-    }
-
-    async fn events_for_thread(
-        &self,
-        bot_user: &str,
-        thread: &ThreadKey,
-    ) -> Result<Vec<ForgeEvent>> {
-        self.forge.resync_thread(bot_user, thread).await
-    }
-
     async fn whoami(&self) -> Result<String> {
         self.forge.whoami().await
     }
@@ -106,10 +92,6 @@ impl WebhookForge for ForgejoWebhook {
     async fn revoke_token(&self, token: &ScopedToken) -> Result<()> {
         self.forge.revoke_token(token).await
     }
-
-    async fn ack(&self, event: &ForgeEvent) -> Result<()> {
-        self.forge.ack(event).await
-    }
 }
 
 type AppRouter = ForgeRouter<ForgejoWebhook, OpenClawCli>;
@@ -118,6 +100,7 @@ type AppRouter = ForgeRouter<ForgejoWebhook, OpenClawCli>;
 struct WebhookState {
     router: Arc<AppRouter>,
     config_path: PathBuf,
+    secret: Arc<str>,
 }
 
 async fn webhook(
@@ -132,6 +115,16 @@ async fn webhook(
     else {
         return StatusCode::UNAUTHORIZED;
     };
+    let events = match webhook_events(&signature, &state.secret, &body) {
+        Ok(events) => events,
+        Err(error) => {
+            eprintln!("webhook rejected: {error}");
+            return StatusCode::UNAUTHORIZED;
+        }
+    };
+    if events.is_empty() {
+        return StatusCode::NO_CONTENT;
+    }
     tokio::spawn(async move {
         let result = async {
             let config: OpenClawConfig =
@@ -146,7 +139,7 @@ async fn webhook(
                 })?
                 .trigger;
             state.router.replace_rules(rules).await;
-            state.router.route(&signature, &body).await
+            state.router.deliver(events).await
         }
         .await;
         if let Err(error) = result {
@@ -180,20 +173,21 @@ async fn main() -> Result<()> {
         password,
     )?);
     let grants = Arc::new(GrantStore::default());
-    let authorizer = Arc::new(ToolAuthorizer::new(grants.clone()));
     let router = Arc::new(ForgeRouter::new(
-        ForgejoWebhook { forge, secret },
+        ForgejoWebhook {
+            forge: forge.clone(),
+        },
         OpenClawCli::new("openclaw"),
         "forgejo",
         daemon.trigger,
-        grants,
+        grants.clone(),
         Duration::from_secs(daemon.grant_ttl_secs),
     ));
     let tools = ToolServer::new(
         daemon.forge.url,
         read_token,
         authorization,
-        authorizer,
+        grants,
         daemon.workspace,
     )
     .router();
@@ -203,6 +197,7 @@ async fn main() -> Result<()> {
         .with_state(WebhookState {
             router,
             config_path: config_path.into(),
+            secret: secret.into(),
         })
         .merge(tools);
     let listener = tokio::net::TcpListener::bind(daemon.listen).await?;
@@ -212,7 +207,10 @@ async fn main() -> Result<()> {
 }
 
 fn required_env(name: &str) -> Result<String> {
-    env::var(name).map_err(|_| forgeclaw_core::Error::Config(format!("{name} is not set")))
+    env::var(name)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| forgeclaw_core::Error::Config(format!("{name} is not set")))
 }
 
 #[cfg(test)]
