@@ -71,14 +71,17 @@ fn find_session_key(database: &Path, turn_id: &str) -> Result<Option<SessionKey>
 fn session_key_from_event(event: &str, turn_id: &str) -> Option<SessionKey> {
     let value: Value = serde_json::from_str(event).ok()?;
     let is_started = value.get("type").and_then(Value::as_str) == Some("session.started");
-    let data = value.get("data")?;
-    let event_turn = data.get("threadId").and_then(Value::as_str)?;
+    let data = value.get("data");
+    let event_turn = value
+        .get("sessionId")
+        .or_else(|| data.and_then(|data| data.get("threadId")))
+        .and_then(Value::as_str)?;
     if !is_started || event_turn != turn_id {
         return None;
     }
     value
         .get("sessionKey")
-        .or_else(|| data.get("sessionKey"))
+        .or_else(|| data.and_then(|data| data.get("sessionKey")))
         .and_then(Value::as_str)
         .map(SessionKey::new)
 }
@@ -93,6 +96,15 @@ mod tests {
         let event = r#"{"type":"session.started","sessionKey":"agent:main:forgeclaw/issue-1","data":{"threadId":"turn-1"}}"#;
         assert_eq!(
             session_key_from_event(event, "turn-1"),
+            Some(SessionKey::new("agent:main:forgeclaw/issue-1"))
+        );
+    }
+
+    #[test]
+    fn accepts_current_openclaw_top_level_session_id() {
+        let event = r#"{"type":"session.started","sessionId":"session-1","sessionKey":"agent:main:forgeclaw/issue-1","data":{}}"#;
+        assert_eq!(
+            session_key_from_event(event, "session-1"),
             Some(SessionKey::new("agent:main:forgeclaw/issue-1"))
         );
     }
