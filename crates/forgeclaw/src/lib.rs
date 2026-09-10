@@ -5,4 +5,5 @@
 
 pub mod authorization;
 pub mod grants;
+pub mod http_tools;
 pub mod router;

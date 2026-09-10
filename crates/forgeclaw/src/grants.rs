@@ -15,6 +15,10 @@ impl SessionKey {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// A currently valid authority to mutate one forge thread.
@@ -79,15 +83,24 @@ impl GrantStore {
     /// A missing, expired, or mismatched grant is deliberately indistinguishable
     /// to the caller: all are read-only.
     pub fn can_write(&self, session: &SessionKey, thread: &ThreadKey) -> bool {
+        self.authorized_token(session, thread).is_some()
+    }
+
+    /// Returns a scoped credential only after the same exact-subject check
+    /// used for authorization. This is daemon-internal; it is never serialized
+    /// into a tool response.
+    pub fn authorized_token(
+        &self,
+        session: &SessionKey,
+        thread: &ThreadKey,
+    ) -> Option<ScopedToken> {
         let mut grants = self.lock();
-        let Some(grant) = grants.get(session) else {
-            return false;
-        };
+        let grant = grants.get(session)?;
         if grant.expires_at <= Instant::now() {
             grants.remove(session);
-            return false;
+            return None;
         }
-        grant.thread == *thread
+        (grant.thread == *thread).then(|| grant.token.clone())
     }
 
     /// Drops expired grants and returns their tokens for revocation.

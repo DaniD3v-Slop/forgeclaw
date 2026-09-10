@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -91,6 +92,48 @@ pub trait WebhookForge: Send + Sync {
 #[async_trait]
 pub trait Gateway: Send + Sync {
     async fn submit(&self, session_key: &str, message: &str) -> Result<()>;
+}
+
+/// Gateway submission through the supported OpenClaw CLI. The daemon image is
+/// based on the gateway image, so this command uses the same persisted config
+/// and agent database as the long-lived gateway service.
+#[derive(Debug, Clone)]
+pub struct OpenClawCli {
+    program: PathBuf,
+}
+
+impl OpenClawCli {
+    pub fn new(program: impl Into<PathBuf>) -> Self {
+        Self {
+            program: program.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl Gateway for OpenClawCli {
+    async fn submit(&self, session_key: &str, message: &str) -> Result<()> {
+        let status = tokio::process::Command::new(&self.program)
+            .args([
+                "agent",
+                "--agent",
+                "main",
+                "--session-key",
+                session_key,
+                "--message",
+                message,
+                "--json",
+            ])
+            .status()
+            .await?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(forgeclaw_core::Error::Forge(format!(
+                "openclaw agent exited with {status}"
+            )))
+        }
+    }
 }
 
 /// The outcome of accepting one delivery. It is useful for HTTP status/logging
