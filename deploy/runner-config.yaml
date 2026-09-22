@@ -1,0 +1,18 @@
+log:
+  level: info
+
+runner:
+  file: /data/.runner
+  capacity: 1
+  timeout: 30m
+  labels:
+    - "ubuntu-latest:docker://ghcr.io/catthehacker/ubuntu:act-latest"
+
+cache:
+  enabled: false
+
+container:
+  network: forgeclaw
+  privileged: false
+  docker_host: "unix:///run/user/1000/podman/podman.sock"
+  valid_volumes: []

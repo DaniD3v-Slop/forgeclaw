@@ -1,0 +1,21 @@
+{
+  "name": "openclaw-plugin-forgeclaw",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "files": [
+    "index.js",
+    "openclaw.plugin.json",
+    "ui.html",
+    "skills"
+  ],
+  "peerDependencies": {
+    "openclaw": ">=2026.8.2"
+  },
+  "openclaw": {
+    "extensions": ["./index.js"],
+    "compat": {
+      "pluginApi": ">=2026.8.2"
+    }
+  }
+}

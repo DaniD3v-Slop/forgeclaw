@@ -1,0 +1,27 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/forgeclaw-core",
+    "crates/forge/forgejo",
+    "crates/forgeclaw",
+]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/DaniD3v-Slop/forgeclaw"
+
+[workspace.lints.clippy]
+# Do not silence lints: fix them. `#[expect]` needs a reason and is a last resort.
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+
+[workspace.dependencies]
+async-trait = "0.1.92"
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+forgeclaw-core = { path = "crates/forgeclaw-core" }
+forgeclaw-forgejo = { path = "crates/forge/forgejo" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "process", "sync", "time", "fs", "signal"] }
+url = "2.5.8"

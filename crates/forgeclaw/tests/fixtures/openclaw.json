@@ -1,0 +1,23 @@
+{
+  "plugins": {
+    "entries": {
+      "memory-core": {
+        "enabled": false
+      },
+      "forgeclaw": {
+        "config": {
+          "listen": "127.0.0.1:18790",
+          "daemon_url": "http://forgeclaw:3080",
+          "workspace": "/tmp/forgeclaw-workspace",
+          "authorization_env": "FORGECLAW_MCP_AUTHORIZATION",
+          "forge": {
+            "url": "http://127.0.0.1:3000",
+            "token_env": "FORGECLAW_TEST_TOKEN",
+            "webhook_secret_env": "FORGECLAW_TEST_WEBHOOK_SECRET"
+          },
+          "trigger": []
+        }
+      }
+    }
+  }
+}

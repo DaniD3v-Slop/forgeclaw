@@ -1,0 +1,84 @@
+{
+  "id": "forgeclaw",
+  "name": "Forgeclaw",
+  "description": "Forge automation configuration and teammate skill.",
+  "version": "0.1.0",
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "tools": [
+      "forge_read",
+      "forge_search_issues",
+      "forge_comment",
+      "forge_create_pr",
+      "forge_submit_review",
+      "forge_checkout",
+      "forge_push"
+    ]
+  },
+  "skills": ["./skills"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["listen", "daemon_url", "authorization_env", "forge", "workspace"],
+    "properties": {
+      "listen": { "type": "string" },
+      "daemon_url": { "type": "string", "format": "uri" },
+      "workspace": { "type": "string" },
+      "grant_ttl_secs": { "type": "integer", "minimum": 1 },
+      "authorization_env": { "type": "string" },
+      "forge": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["url", "token_env", "password_env", "webhook_secret_env"],
+        "properties": {
+          "url": { "type": "string", "format": "uri" },
+          "token_env": { "type": "string" },
+          "password_env": { "type": "string" },
+          "webhook_secret_env": { "type": "string" }
+        }
+      },
+      "trigger": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["on"],
+          "properties": {
+            "on": {
+              "type": "string",
+              "enum": [
+                "comment.created",
+                "issue.assigned",
+                "pull_request.review_requested",
+                "pull_request.changes_requested",
+                "ci.run_completed",
+                "pull_request.opened"
+              ]
+            },
+            "enabled": { "type": "boolean" },
+            "filter": {
+              "oneOf": [
+                { "type": "object", "additionalProperties": { "type": "string", "minLength": 1 } },
+                {
+                  "type": "array",
+                  "items": { "type": "object", "additionalProperties": { "type": "string", "minLength": 1 } }
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "uiHints": {
+    "listen": { "label": "Daemon listen address", "advanced": true },
+    "daemon_url": { "label": "Daemon URL", "advanced": true },
+    "authorization_env": { "label": "Daemon authorization environment variable", "advanced": true },
+    "workspace": { "label": "Shared agent workspace", "advanced": true },
+    "grant_ttl_secs": { "label": "Grant lifetime", "advanced": true },
+    "trigger": { "label": "Triggers (use the ForgeClaw page)", "advanced": true },
+    "forge": { "label": "Forgejo connection", "advanced": true }
+  }
+}
