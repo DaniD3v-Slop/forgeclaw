@@ -17,6 +17,7 @@ use forgeclaw::router::{OpenClawCli, Router as ForgeRouter, TriggerRule, Webhook
 use forgeclaw_core::{Forge, Result, ScopedToken};
 use forgeclaw_forgejo::{Forgejo, webhook_events};
 use serde::Deserialize;
+use serde_json::Value;
 use url::Url;
 
 #[derive(Deserialize)]
@@ -25,11 +26,18 @@ struct OpenClawConfig {
 }
 
 impl OpenClawConfig {
-    fn forgeclaw(self) -> Option<DaemonConfig> {
-        self.plugins
+    fn forgeclaw(self) -> Result<Option<DaemonConfig>> {
+        let config = self
+            .plugins
             .entries
             .into_iter()
-            .find_map(|(id, entry)| (id == "forgeclaw").then_some(entry.config).flatten())
+            .find_map(|(id, entry)| (id == "forgeclaw").then_some(entry.config).flatten());
+        config
+            .map(|value| {
+                serde_json::from_value(value)
+                    .map_err(|error| forgeclaw_core::Error::Config(error.to_string()))
+            })
+            .transpose()
     }
 }
 
@@ -40,7 +48,7 @@ struct PluginConfig {
 
 #[derive(Deserialize)]
 struct PluginEntry {
-    config: Option<DaemonConfig>,
+    config: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -130,7 +138,7 @@ async fn webhook(
                 serde_json::from_slice(&std::fs::read(&state.config_path)?)
                     .map_err(|error| forgeclaw_core::Error::Config(error.to_string()))?;
             let rules = config
-                .forgeclaw()
+                .forgeclaw()?
                 .ok_or_else(|| {
                     forgeclaw_core::Error::Config(
                         "plugins.entries.forgeclaw.config is required".into(),
@@ -155,7 +163,7 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| "/home/node/.openclaw/openclaw.json".into());
     let config: OpenClawConfig = serde_json::from_slice(&std::fs::read(&config_path)?)
         .map_err(|error| forgeclaw_core::Error::Config(error.to_string()))?;
-    let daemon = config.forgeclaw().ok_or_else(|| {
+    let daemon = config.forgeclaw()?.ok_or_else(|| {
         forgeclaw_core::Error::Config("plugins.entries.forgeclaw.config is required".into())
     })?;
     let read_token = required_env(&daemon.forge.token_env)?;
@@ -226,6 +234,7 @@ mod tests {
         let config: OpenClawConfig = serde_json::from_value(serde_json::json!({
             "plugins": {"entries": {
                 "another-plugin": {"enabled": true},
+                "device-pair": {"config": {"publicUrl": "wss://example.invalid"}},
                 "forgeclaw": {"config": {
                     "listen": "127.0.0.1:3080",
                     "daemon_url": "http://forgeclaw:3080",
@@ -243,6 +252,8 @@ mod tests {
         .unwrap();
 
         assert!(config.plugins.entries["another-plugin"].config.is_none());
+        assert!(config.plugins.entries["device-pair"].config.is_some());
         assert!(config.plugins.entries["forgeclaw"].config.is_some());
+        assert!(config.forgeclaw().unwrap().is_some());
     }
 }
