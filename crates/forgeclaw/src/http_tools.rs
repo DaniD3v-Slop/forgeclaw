@@ -20,6 +20,7 @@ use crate::grants::{GrantStore, SessionKey};
 pub struct ToolServer {
     forge_url: Url,
     forge: Arc<dyn Forge>,
+    read_token: String,
     authorization: Option<String>,
     grants: Arc<GrantStore>,
     workspace: PathBuf,
@@ -29,6 +30,7 @@ impl ToolServer {
     pub fn new(
         forge_url: Url,
         forge: Arc<dyn Forge>,
+        read_token: String,
         authorization: Option<String>,
         grants: Arc<GrantStore>,
         workspace: PathBuf,
@@ -36,6 +38,7 @@ impl ToolServer {
         Self {
             forge_url,
             forge,
+            read_token,
             authorization,
             grants,
             workspace,
@@ -215,7 +218,11 @@ async fn tool_call(
             };
             sync_checkout(
                 &server.clone_url(&repo)?,
-                token.as_ref().map(|token| token.secret.as_str()),
+                Some(
+                    token
+                        .as_ref()
+                        .map_or(server.read_token.as_str(), |token| token.secret.as_str()),
+                ),
                 &path,
             )
             .await?
