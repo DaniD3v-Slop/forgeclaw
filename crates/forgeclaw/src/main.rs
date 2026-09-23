@@ -198,6 +198,7 @@ async fn main() -> Result<()> {
     let tools = ToolServer::new(
         daemon.forge.url,
         forge,
+        read_token,
         authorization,
         grants,
         daemon.workspace,
