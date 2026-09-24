@@ -13,7 +13,9 @@ pub struct SessionKey(String);
 
 impl SessionKey {
     pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
+        // OpenClaw canonicalizes session keys to lowercase before passing them
+        // to plugin tools, including keys supplied to `openclaw agent`.
+        Self(value.into().to_ascii_lowercase())
     }
 
     pub fn as_str(&self) -> &str {
@@ -69,7 +71,7 @@ impl GrantStore {
         if grant.expires_at <= Instant::now() {
             return false;
         }
-        grant.thread == *thread
+        same_subject(&grant.thread, thread)
     }
 
     pub fn authorized_token(
@@ -79,12 +81,19 @@ impl GrantStore {
     ) -> Option<ScopedToken> {
         let grants = self.lock();
         let grant = grants.get(session)?;
-        (grant.expires_at > Instant::now() && grant.thread == *thread).then(|| grant.token.clone())
+        (grant.expires_at > Instant::now() && same_subject(&grant.thread, thread))
+            .then(|| grant.token.clone())
     }
 
     fn lock(&self) -> MutexGuard<'_, HashMap<SessionKey, Grant>> {
         self.grants.lock().expect("grant store mutex poisoned")
     }
+}
+
+fn same_subject(a: &ThreadKey, b: &ThreadKey) -> bool {
+    a.subject == b.subject
+        && a.repo.owner.eq_ignore_ascii_case(&b.repo.owner)
+        && a.repo.name.eq_ignore_ascii_case(&b.repo.name)
 }
 
 #[cfg(test)]
@@ -124,6 +133,28 @@ mod tests {
         assert!(store.can_write(&session, &thread(1)));
         assert!(!store.can_write(&session, &thread(2)));
         assert!(!store.can_write(&SessionKey::new("session-b"), &thread(1)));
+    }
+
+    #[test]
+    fn mixed_case_forgejo_repo_matches_openclaw_session_key() {
+        let store = GrantStore::default();
+        let mut original = thread(2);
+        original.repo.owner = "SrinoHosting".into();
+        original.repo.name = "Infra".into();
+        store.insert(
+            SessionKey::new("agent:main:forgeclaw:forgejo/SrinoHosting/Infra#issue/2"),
+            original,
+            token(),
+            Duration::from_secs(60),
+        );
+
+        let session = SessionKey::new("agent:main:forgeclaw:forgejo/srinohosting/infra#issue/2");
+        let mut requested = thread(2);
+        requested.repo.owner = "srinohosting".into();
+        requested.repo.name = "infra".into();
+        assert!(store.authorized_token(&session, &requested).is_some());
+        requested.repo.name = "other".into();
+        assert!(store.authorized_token(&session, &requested).is_none());
     }
 
     #[test]
