@@ -54,12 +54,18 @@ const tools = [
     ),
   },
   {
+    name: "forge_create_issue",
+    label: "Create issue",
+    description: "Open an issue in a repository.",
+    parameters: object({ repo: repository, title: string, body: string }, ["repo", "title", "body"]),
+  },
+  {
     name: "forge_create_pr",
     label: "Create pull request",
-    description: "Open a pull request from an existing branch for an authorized issue.",
+    description: "Open a pull request from an existing branch in a repository.",
     parameters: object(
-      { subject, title: string, body: string, branch: string },
-      ["subject", "title", "body", "branch"],
+      { repo: repository, title: string, body: string, branch: string },
+      ["repo", "title", "body", "branch"],
     ),
   },
   {
@@ -80,13 +86,13 @@ const tools = [
     name: "forge_checkout",
     label: "Check out forge repository",
     description:
-      "Clone a repository into the shared agent workspace. An authorized turn receives its bot fork; other sessions receive a source checkout.",
+      "Clone the bot fork into the shared agent workspace for a forge subject.",
     parameters: object({ subject }, ["subject"]),
   },
   {
     name: "forge_push",
     label: "Push forge branch",
-    description: "Push the current shared checkout as a branch for the authorized subject.",
+    description: "Create a new branch from the subject checkout. Updating an existing branch requires authority over its pull request.",
     parameters: object({ subject, branch: string }, ["subject", "branch"]),
   },
 ];

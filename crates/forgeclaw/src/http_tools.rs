@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -12,6 +13,16 @@ use tokio::process::Command;
 use url::Url;
 
 use crate::grants::{GrantStore, SessionKey};
+
+static TOKEN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn temporary_token_label(action: &str) -> String {
+    format!(
+        "chat-{action}-{}-{}",
+        std::process::id(),
+        TOKEN_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    )
+}
 
 /// State for the authenticated HTTP bridge used by the OpenClaw plugin tools.
 ///
@@ -149,28 +160,66 @@ async fn tool_call(
             format!("posted comment #{id}")
         }
         "forge_create_pr" => {
-            let thread = subject(arguments)?;
-            require_issue_subject(&thread)?;
+            let repo = repo(arguments)?;
             let title = string(arguments, "title")?;
             let body = string(arguments, "body")?;
             let branch = string(arguments, "branch")?;
             valid_branch(branch)?;
-            let token = require_write(server, session, &thread)?;
-            let id = server
+            let token = server
                 .forge
-                .with_token(&token.secret)
-                .map_err(|error| error.to_string())?
-                .create_pr(
-                    &thread.repo,
-                    NewPr {
-                        title: title.into(),
-                        body: body.into(),
-                        branch: branch.into(),
-                    },
-                )
+                .mint_token(&temporary_token_label("create-pr"))
                 .await
                 .map_err(|error| error.to_string())?;
+            let result = async {
+                server
+                    .forge
+                    .with_token(&token.secret)
+                    .map_err(|error| error.to_string())?
+                    .create_pr(
+                        &repo,
+                        NewPr {
+                            title: title.into(),
+                            body: body.into(),
+                            branch: branch.into(),
+                        },
+                    )
+                    .await
+                    .map_err(|error| error.to_string())
+            }
+            .await;
+            server
+                .forge
+                .revoke_token(&token)
+                .await
+                .map_err(|error| error.to_string())?;
+            let id = result?;
             format!("opened PR #{id}")
+        }
+        "forge_create_issue" => {
+            let repo = repo(arguments)?;
+            let title = string(arguments, "title")?;
+            let body = string(arguments, "body")?;
+            let token = server
+                .forge
+                .mint_token(&temporary_token_label("create-issue"))
+                .await
+                .map_err(|error| error.to_string())?;
+            let result = async {
+                server
+                    .forge
+                    .with_token(&token.secret)
+                    .map_err(|error| error.to_string())?
+                    .create_issue(&repo, title, body)
+                    .await
+                    .map_err(|error| error.to_string())
+            }
+            .await;
+            server
+                .forge
+                .revoke_token(&token)
+                .await
+                .map_err(|error| error.to_string())?;
+            format!("opened issue #{}", result?)
         }
         "forge_submit_review" => {
             let thread = subject(arguments)?;
@@ -203,26 +252,43 @@ async fn tool_call(
         "forge_checkout" => {
             let thread = subject(arguments)?;
             let token = authorized_token(server, session, &thread);
-            let writable = token.is_some();
-            let path = server.checkout_path(&thread, writable);
-            let repo = if writable {
+            let path = server.checkout_path(&thread, true);
+            let temporary = if token.is_none() {
+                Some(
+                    server
+                        .forge
+                        .mint_token(&temporary_token_label("checkout"))
+                        .await
+                        .map_err(|error| error.to_string())?,
+                )
+            } else {
+                None
+            };
+            let credential = token
+                .as_ref()
+                .or(temporary.as_ref())
+                .expect("checkout has token");
+            let result = async {
                 server
                     .forge
-                    .with_token(&token.as_ref().expect("writable checkout has token").secret)
+                    .with_token(&credential.secret)
                     .map_err(|error| error.to_string())?
                     .ensure_fork(&thread.repo)
                     .await
-                    .map_err(|error| error.to_string())?
-            } else {
-                thread.repo.clone()
-            };
+                    .map_err(|error| error.to_string())
+            }
+            .await;
+            if let Some(temporary) = temporary {
+                server
+                    .forge
+                    .revoke_token(&temporary)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            let repo = result?;
             sync_checkout(
                 &server.clone_url(&repo)?,
-                Some(
-                    token
-                        .as_ref()
-                        .map_or(server.read_token.as_str(), |token| token.secret.as_str()),
-                ),
+                Some(server.read_token.as_str()),
                 &path,
             )
             .await?
@@ -231,20 +297,38 @@ async fn tool_call(
             let thread = subject(arguments)?;
             let branch = string(arguments, "branch")?;
             valid_branch(branch)?;
-            let token = require_write(server, session, &thread)?;
-            require_bot_owned_pr(server, &thread).await?;
             let path = server.checkout_path(&thread, true);
             if !path.join(".git").is_dir() {
-                return Err("checkout the authorized subject before pushing".into());
+                return Err("checkout the subject before pushing".into());
             }
-            let fork = server
+            let temporary = server
                 .forge
-                .with_token(&token.secret)
-                .map_err(|error| error.to_string())?
-                .ensure_fork(&thread.repo)
+                .mint_token(&temporary_token_label("push"))
                 .await
                 .map_err(|error| error.to_string())?;
-            push_from_clean_repo(&path, &server.clone_url(&fork)?, &token.secret, branch).await?;
+            let result = async {
+                let fork = server
+                    .forge
+                    .with_token(&temporary.secret)
+                    .map_err(|error| error.to_string())?
+                    .ensure_fork(&thread.repo)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let url = server.clone_url(&fork)?;
+                let exists = remote_branch_exists(&url, &temporary.secret, branch).await?;
+                if exists {
+                    require_write(server, session, &thread)?;
+                    require_bot_owned_pr(server, &thread, branch).await?;
+                }
+                push_from_clean_repo(&path, &url, &temporary.secret, branch, !exists).await
+            }
+            .await;
+            server
+                .forge
+                .revoke_token(&temporary)
+                .await
+                .map_err(|error| error.to_string())?;
+            result?;
             format!("pushed branch {branch}")
         }
         other => return Err(format!("unknown forge tool: {other}")),
@@ -252,18 +336,13 @@ async fn tool_call(
     Ok(json!({"content": [{"type": "text", "text": text}]}))
 }
 
-fn require_issue_subject(thread: &ThreadKey) -> Result<(), String> {
-    matches!(thread.subject, forgeclaw_core::Subject::Issue(_))
-        .then_some(())
-        .ok_or_else(|| {
-            "new pull requests can only be opened for issue subjects; update the existing pull request branch instead"
-                .into()
-        })
-}
-
-async fn require_bot_owned_pr(server: &ToolServer, thread: &ThreadKey) -> Result<(), String> {
+async fn require_bot_owned_pr(
+    server: &ToolServer,
+    thread: &ThreadKey,
+    branch: &str,
+) -> Result<(), String> {
     if !matches!(thread.subject, forgeclaw_core::Subject::Pr(_)) {
-        return Ok(());
+        return Err("existing branches require an authorized pull request subject".into());
     }
     let context = server
         .forge
@@ -275,10 +354,10 @@ async fn require_bot_owned_pr(server: &ToolServer, thread: &ThreadKey) -> Result
         .whoami()
         .await
         .map_err(|error| error.to_string())?;
-    require_head_owner(&context, &bot)
+    require_head_owner(&context, &bot, branch)
 }
 
-fn require_head_owner(context: &Value, bot: &str) -> Result<(), String> {
+fn require_head_owner(context: &Value, bot: &str, branch: &str) -> Result<(), String> {
     let owner = context
         .get("head_owner")
         .and_then(Value::as_str)
@@ -288,6 +367,11 @@ fn require_head_owner(context: &Value, bot: &str) -> Result<(), String> {
         return Err(format!(
             "cannot push to this pull request: its head branch is owned by {owner}, not {bot}"
         ));
+    }
+    if context.get("head_branch").and_then(Value::as_str) != Some(branch) {
+        return Err(
+            "cannot push to this pull request: branch does not match its head branch".into(),
+        );
     }
     Ok(())
 }
@@ -393,6 +477,7 @@ async fn push_from_clean_repo(
     url: &Url,
     token: &str,
     branch: &str,
+    create_only: bool,
 ) -> Result<(), String> {
     let staging = tempdir().map_err(|error| error.to_string())?;
     let bare = staging.path().join("push.git");
@@ -422,10 +507,37 @@ async fn push_from_clean_repo(
         bare.to_str().ok_or("invalid temporary path")?,
         "push",
         "--no-verify",
-        url.as_str(),
-        &format!("FETCH_HEAD:refs/heads/{branch}"),
     ]);
+    if create_only {
+        push.arg(format!("--force-with-lease=refs/heads/{branch}:"));
+    }
+    push.args([url.as_str(), &format!("FETCH_HEAD:refs/heads/{branch}")]);
     run_git(push, Some(token)).await
+}
+
+async fn remote_branch_exists(url: &Url, token: &str, branch: &str) -> Result<bool, String> {
+    let mut command = Command::new("git");
+    command.args([
+        "ls-remote",
+        "--exit-code",
+        "--heads",
+        url.as_str(),
+        &format!("refs/heads/{branch}"),
+    ]);
+    scrub_git_environment(&mut command);
+    command
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "http.extraHeader")
+        .env(
+            "GIT_CONFIG_VALUE_0",
+            format!("Authorization: token {token}"),
+        );
+    let status = command.status().await.map_err(|error| error.to_string())?;
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(2) => Ok(false),
+        _ => Err("cannot check remote branch".into()),
+    }
 }
 
 async fn run_git(mut command: Command, token: Option<&str>) -> Result<(), String> {
@@ -530,24 +642,33 @@ mod tests {
     }
 
     #[test]
-    fn pull_request_subjects_cannot_open_another_pull_request() {
-        let thread = subject(&json!({"subject": "owner/repo#pr/7"})).unwrap();
-        assert_eq!(
-            require_issue_subject(&thread).unwrap_err(),
-            "new pull requests can only be opened for issue subjects; update the existing pull request branch instead"
-        );
-        let issue = subject(&json!({"subject": "owner/repo#issue/7"})).unwrap();
-        assert!(require_issue_subject(&issue).is_ok());
-    }
-
-    #[test]
     fn only_bot_owned_pull_request_heads_are_writable() {
-        assert!(require_head_owner(&json!({"head_owner": "bot"}), "bot").is_ok());
+        assert!(
+            require_head_owner(
+                &json!({"head_owner": "bot", "head_branch": "fix"}),
+                "bot",
+                "fix"
+            )
+            .is_ok()
+        );
         assert_eq!(
-            require_head_owner(&json!({"head_owner": "alice"}), "bot").unwrap_err(),
+            require_head_owner(
+                &json!({"head_owner": "alice", "head_branch": "fix"}),
+                "bot",
+                "fix"
+            )
+            .unwrap_err(),
             "cannot push to this pull request: its head branch is owned by alice, not bot"
         );
-        assert!(require_head_owner(&json!({}), "bot").is_err());
+        assert!(
+            require_head_owner(
+                &json!({"head_owner": "bot", "head_branch": "fix"}),
+                "bot",
+                "other"
+            )
+            .is_err()
+        );
+        assert!(require_head_owner(&json!({}), "bot", "fix").is_err());
     }
 
     #[test]
@@ -687,9 +808,26 @@ mod tests {
                 .unwrap()
                 .success()
         );
-        push_from_clean_repo(&checkout, &url, "dummy-token", "feature")
+        push_from_clean_repo(&checkout, &url, "dummy-token", "feature", true)
             .await
             .unwrap();
+        assert!(
+            remote_branch_exists(&url, "dummy-token", "feature")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !remote_branch_exists(&url, "dummy-token", "other")
+                .await
+                .unwrap()
+        );
+        std::fs::write(checkout.join("README.md"), "changed\n").unwrap();
+        git(&checkout, &["commit", "-am", "second"]);
+        assert!(
+            push_from_clean_repo(&checkout, &url, "dummy-token", "feature", true)
+                .await
+                .is_err()
+        );
         let config = std::fs::read_to_string(checkout.join(".git/config")).unwrap();
         assert!(!config.contains("dummy-token"));
         assert!(!checkout.join(".git/credential-leak").exists());

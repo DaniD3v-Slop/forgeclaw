@@ -21,3 +21,11 @@ daemon, then retrigger the Forgejo event. Verify that the turn receives a
 writable checkout and can write only to its issue or pull request. A later
 message in the same OpenClaw chat is read-only after the event turn ends; that
 is the expected grant lifetime.
+
+Comment creation and edits both use the `comment.created` trigger rules. Adding
+`@forgeclaw` in an edit can start a turn; editing a comment that still mentions
+the bot can start another. Deleted comments are ignored.
+
+Any chat can open an issue or pull request and create a branch in the bot fork.
+Updating an existing branch requires an authorized turn for its matching
+bot-owned pull request.

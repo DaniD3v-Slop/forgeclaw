@@ -22,7 +22,7 @@ pub fn webhook_events(signature: &str, secret: &str, body: &[u8]) -> Result<Vec<
     let action = string(&hook, "/action");
     let mut events = Vec::new();
 
-    if action == "created"
+    if matches!(action.as_str(), "created" | "edited")
         && let Some(comment) = hook.get("comment")
         && let Some(subject) = subject(&hook)
     {
@@ -303,6 +303,63 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "comment.created");
         assert_eq!(events[0].payload["mentions"], json!(["bot"]));
+    }
+
+    #[test]
+    fn edited_comments_use_the_existing_mention_rules() {
+        for body in ["hi @bot", "mention removed"] {
+            for item in ["issue", "pull_request"] {
+                let events = normalize(json!({
+                    "action": "edited",
+                    "repository": {"full_name": "o/r"},
+                    (item): {"number": 7},
+                    "comment": {"id": 42, "body": body, "user": {"login": "alice"}}
+                }));
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].kind, "comment.created");
+                assert_eq!(
+                    events[0].subject,
+                    if item == "issue" {
+                        Subject::Issue(7)
+                    } else {
+                        Subject::Pr(7)
+                    }
+                );
+                assert_eq!(events[0].payload["author"], "alice");
+                assert_eq!(events[0].payload["body"], body);
+                assert_eq!(
+                    events[0].payload["mentions"],
+                    if body == "hi @bot" {
+                        json!(["bot"])
+                    } else {
+                        json!([])
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn edited_inline_comment_preserves_reply_target() {
+        let events = normalize(json!({
+            "action": "edited", "repository": {"full_name": "o/r"},
+            "pull_request": {"number": 7},
+            "comment": {"id": 42, "path": "README.md", "body": "hi @bot", "user": {"login": "alice"}}
+        }));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].payload["reply_to"], 42);
+    }
+
+    #[test]
+    fn deleted_comment_does_not_trigger_a_turn() {
+        assert!(
+            normalize(json!({
+                "action": "deleted", "repository": {"full_name": "o/r"},
+                "issue": {"number": 7},
+                "comment": {"id": 42, "body": "hi @bot", "user": {"login": "alice"}}
+            }))
+            .is_empty()
+        );
     }
 
     #[test]
