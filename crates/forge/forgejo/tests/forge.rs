@@ -162,6 +162,27 @@ async fn creates_pull_request_from_bot_fork() {
 }
 
 #[tokio::test]
+async fn creates_issue_in_selected_repository() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/repos/o/r/issues"))
+        .and(body_partial_json(
+            json!({"title": "New task", "body": "Details"}),
+        ))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({"number": 12})))
+        .mount(&server)
+        .await;
+
+    assert_eq!(
+        client(&server)
+            .create_issue(&repo(), "New task", "Details")
+            .await
+            .unwrap(),
+        12
+    );
+}
+
+#[tokio::test]
 async fn pull_request_context_exposes_head_ownership() {
     let server = MockServer::start().await;
     mock(

@@ -15,6 +15,7 @@ pub trait Forge: Send + Sync {
     async fn context(&self, thread: &ThreadKey) -> Result<Value>;
     async fn ensure_fork(&self, repo: &RepoId) -> Result<RepoId>;
     async fn search_issues(&self, repo: &RepoId, query: &str) -> Result<Vec<IssueSummary>>;
+    async fn create_issue(&self, repo: &RepoId, title: &str, body: &str) -> Result<u64>;
     async fn create_pr(&self, repo: &RepoId, pr: NewPr) -> Result<u64>;
     async fn comment(&self, thread: &ThreadKey, body: &str, reply_to: Option<u64>) -> Result<u64>;
     async fn submit_review(&self, repo: &RepoId, pr: u64, review: Review) -> Result<()>;

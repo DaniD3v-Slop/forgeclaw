@@ -298,6 +298,17 @@ impl Forgejo {
         )
     }
 
+    pub async fn create_issue(&self, repo: &RepoId, title: &str, body: &str) -> Result<u64> {
+        let (owner, name) = own(repo);
+        let options = args(json!({"title": title, "body": body}));
+        required_num(
+            go(self.api.issue_create_issue(owner, name, options))
+                .await?
+                .number,
+            "issue number",
+        )
+    }
+
     pub async fn comment(
         &self,
         thread: &ThreadKey,
@@ -399,6 +410,10 @@ impl Forge for Forgejo {
 
     async fn search_issues(&self, repo: &RepoId, query: &str) -> Result<Vec<IssueSummary>> {
         Forgejo::search_issues(self, repo, query).await
+    }
+
+    async fn create_issue(&self, repo: &RepoId, title: &str, body: &str) -> Result<u64> {
+        Forgejo::create_issue(self, repo, title, body).await
     }
 
     async fn create_pr(&self, repo: &RepoId, pr: NewPr) -> Result<u64> {
