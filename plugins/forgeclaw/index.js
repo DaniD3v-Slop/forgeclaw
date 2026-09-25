@@ -34,7 +34,7 @@ const tools = [
   {
     name: "forge_read",
     label: "Read forge subject",
-    description: "Read a forge issue or pull request.",
+    description: "Read a forge issue or pull request, including the latest pull request CI run, job statuses, and available live logs.",
     parameters: object({ subject }, ["subject"]),
   },
   {

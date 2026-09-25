@@ -83,26 +83,42 @@ impl Forgejo {
             .max_by_key(|run| run.id)
     }
 
-    async fn failed_run_log(&self, repo: &RepoId, pr: u64) -> Option<String> {
+    async fn run_context(&self, repo: &RepoId, pr: u64) -> Option<Value> {
         let run = self.latest_run(repo, pr).await?;
-        if run.status.as_deref() != Some("failure") {
-            return None;
-        }
+        let mut context = json!({
+            "id": run.id,
+            "status": run.status,
+            "url": run.html_url,
+            "workflow": run.workflow_id,
+            "jobs": [],
+        });
+        let Some(run_id) = run.id else {
+            return Some(context);
+        };
         let (owner, name) = own(repo);
-        let jobs = self
-            .api
-            .list_action_run_jobs(owner, name, run.id?)
-            .await
-            .ok()?;
-        let job = jobs
-            .iter()
-            .find(|job| job.status.as_deref() == Some("failure"))?;
-        let log = self
-            .api
-            .repo_get_action_job_logs(owner, name, job.id?, Default::default())
-            .await
-            .ok()?;
-        Some(clip_tail(log))
+        let Ok(jobs) = self.api.list_action_run_jobs(owner, name, run_id).await else {
+            return Some(context);
+        };
+        let mut remaining = EXCERPT_MAX;
+        let mut summaries = Vec::with_capacity(jobs.len());
+        for job in jobs {
+            let mut summary = json!({"id": job.id, "name": job.name, "status": job.status});
+            if remaining > 0
+                && matches!(job.status.as_deref(), Some("running" | "failure"))
+                && let Some(id) = job.id
+                && let Ok(log) = self
+                    .api
+                    .repo_get_action_job_logs(owner, name, id, Default::default())
+                    .await
+            {
+                let log = clip_tail_to(log, remaining);
+                remaining -= log.len();
+                summary["log"] = log.into();
+            }
+            summaries.push(summary);
+        }
+        context["jobs"] = summaries.into();
+        Some(context)
     }
 
     async fn reviews(&self, owner: &str, name: &str, pr: i64) -> Result<Vec<Value>> {
@@ -221,8 +237,8 @@ impl Forgejo {
                 Default::default(),
             );
             context["diff"] = clip(go(diff).await?).into();
-            if let Some(log) = self.failed_run_log(&thread.repo, number).await {
-                context["ci_log"] = log.into();
+            if let Some(run) = self.run_context(&thread.repo, number).await {
+                context["ci_run"] = run;
             }
             context["reviews"] = json!(self.reviews(owner, name, number as i64).await?);
         }
@@ -526,9 +542,9 @@ fn clip(mut value: String) -> String {
     value
 }
 
-fn clip_tail(mut value: String) -> String {
-    if value.len() > EXCERPT_MAX {
-        let mut start = value.len() - EXCERPT_MAX;
+fn clip_tail_to(mut value: String, limit: usize) -> String {
+    if value.len() > limit {
+        let mut start = value.len() - limit;
         while !value.is_char_boundary(start) {
             start += 1;
         }

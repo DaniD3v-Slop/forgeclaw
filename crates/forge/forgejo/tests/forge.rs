@@ -227,9 +227,28 @@ async fn pull_request_context_exposes_head_ownership() {
         "GET",
         "/api/v1/repos/o/r/actions/runs",
         200,
-        json!({"workflow_runs": []}),
+        json!({"workflow_runs": [
+            {"id": 41, "status": "success", "event_payload": "{\"pull_request\":{\"number\":7}}"},
+            {"id": 42, "status": "running", "workflow_id": "ci.yaml",
+             "event_payload": "{\"pull_request\":{\"number\":7}}"},
+            {"id": 43, "status": "failure", "event_payload": "{\"pull_request\":{\"number\":8}}"}
+        ]}),
     )
     .await;
+    mock(
+        &server,
+        "GET",
+        "/api/v1/repos/o/r/actions/runs/42/jobs",
+        200,
+        json!([{"id": 9, "name": "test", "status": "running"},
+               {"id": 10, "name": "package", "status": "waiting"}]),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/o/r/actions/jobs/9/logs"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("compiling\n"))
+        .mount(&server)
+        .await;
     mock(
         &server,
         "GET",
@@ -246,6 +265,10 @@ async fn pull_request_context_exposes_head_ownership() {
     assert_eq!(context["head_owner"], "alice");
     assert_eq!(context["head_repo"], "alice/r");
     assert_eq!(context["head_branch"], "feature");
+    assert_eq!(context["ci_run"]["id"], 42);
+    assert_eq!(context["ci_run"]["status"], "running");
+    assert_eq!(context["ci_run"]["jobs"][0]["log"], "compiling\n");
+    assert_eq!(context["ci_run"]["jobs"][1]["status"], "waiting");
 }
 
 #[tokio::test]
