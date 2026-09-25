@@ -11,6 +11,7 @@
       "forge_read",
       "forge_search_issues",
       "forge_comment",
+      "forge_resolve_review_comment",
       "forge_create_issue",
       "forge_create_pr",
       "forge_submit_review",
