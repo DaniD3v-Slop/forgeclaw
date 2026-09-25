@@ -54,6 +54,12 @@ const tools = [
     ),
   },
   {
+    name: "forge_resolve_review_comment",
+    label: "Resolve review conversation",
+    description: "Mark an addressed inline review conversation as resolved on the authorized pull request. Use an inline comment id from forge_read.",
+    parameters: object({ subject, comment_id: { type: "integer" } }, ["subject", "comment_id"]),
+  },
+  {
     name: "forge_create_issue",
     label: "Create issue",
     description: "Open an issue in a repository.",

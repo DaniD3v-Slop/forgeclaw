@@ -254,7 +254,15 @@ async fn pull_request_context_exposes_head_ownership() {
         "GET",
         "/api/v1/repos/o/r/pulls/7/reviews",
         200,
-        json!([]),
+        json!([{"id": 11, "body": "Review", "user": {"login": "bob"}}]),
+    )
+    .await;
+    mock(
+        &server,
+        "GET",
+        "/api/v1/repos/o/r/pulls/7/reviews/11/comments",
+        200,
+        json!([{"id": 42, "body": "Fixed?", "resolver": {"login": "alice"}, "user": {"login": "bob"}}]),
     )
     .await;
 
@@ -269,6 +277,7 @@ async fn pull_request_context_exposes_head_ownership() {
     assert_eq!(context["ci_run"]["status"], "running");
     assert_eq!(context["ci_run"]["jobs"][0]["log"], "compiling\n");
     assert_eq!(context["ci_run"]["jobs"][1]["status"], "waiting");
+    assert_eq!(context["reviews"][0]["comments"][0]["resolved"], true);
 }
 
 #[tokio::test]
@@ -303,6 +312,55 @@ async fn missing_comment_id_is_an_error() {
     assert!(
         client(&server)
             .comment(&thread(Subject::Issue(7)), "answer", None)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn resolves_only_a_comment_on_the_named_pull_request() {
+    let server = MockServer::start().await;
+    mock(
+        &server,
+        "GET",
+        "/api/v1/repos/o/r/pulls/7/reviews",
+        200,
+        json!([{"id": 11}]),
+    )
+    .await;
+    mock(
+        &server,
+        "GET",
+        "/api/v1/repos/o/r/pulls/7/reviews/11/comments",
+        200,
+        json!([{"id": 42, "body": "fix this", "resolver": null}]),
+    )
+    .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/repos/o/r/pulls/comments/42/resolve"))
+        .and(wiremock::matchers::header(
+            "authorization",
+            "token test-token",
+        ))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let forge = client(&server);
+    forge
+        .resolve_review_comment(&thread(Subject::Pr(7)), 42)
+        .await
+        .unwrap();
+    assert!(
+        forge
+            .resolve_review_comment(&thread(Subject::Pr(7)), 43)
+            .await
+            .is_err()
+    );
+    assert!(
+        forge
+            .resolve_review_comment(&thread(Subject::Issue(7)), 42)
             .await
             .is_err()
     );

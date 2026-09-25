@@ -159,6 +159,22 @@ async fn tool_call(
                 .map_err(|error| error.to_string())?;
             format!("posted comment #{id}")
         }
+        "forge_resolve_review_comment" => {
+            let thread = subject(arguments)?;
+            let comment_id = arguments
+                .get("comment_id")
+                .and_then(Value::as_u64)
+                .ok_or("missing integer field: comment_id")?;
+            let token = require_write(server, session, &thread)?;
+            server
+                .forge
+                .with_token(&token.secret)
+                .map_err(|error| error.to_string())?
+                .resolve_review_comment(&thread, comment_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            format!("resolved review comment #{comment_id}")
+        }
         "forge_create_pr" => {
             let repo = repo(arguments)?;
             let title = string(arguments, "title")?;

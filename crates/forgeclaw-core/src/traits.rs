@@ -18,6 +18,7 @@ pub trait Forge: Send + Sync {
     async fn create_issue(&self, repo: &RepoId, title: &str, body: &str) -> Result<u64>;
     async fn create_pr(&self, repo: &RepoId, pr: NewPr) -> Result<u64>;
     async fn comment(&self, thread: &ThreadKey, body: &str, reply_to: Option<u64>) -> Result<u64>;
+    async fn resolve_review_comment(&self, thread: &ThreadKey, comment_id: u64) -> Result<()>;
     async fn submit_review(&self, repo: &RepoId, pr: u64, review: Review) -> Result<()>;
 
     /// Create and revoke the credential attached to one routed agent turn.

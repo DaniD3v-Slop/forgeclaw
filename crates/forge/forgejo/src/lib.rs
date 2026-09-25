@@ -22,6 +22,7 @@ const EXCERPT_MAX: usize = 64 * 1024;
 const TOKEN_SCOPES: &[&str] = &["write:repository", "write:issue", "read:user"];
 pub struct Forgejo {
     api: forgejo_api::Forgejo,
+    http: reqwest::Client,
     url: Url,
     password: Option<String>,
     me: OnceLock<String>,
@@ -29,8 +30,17 @@ pub struct Forgejo {
 
 impl Forgejo {
     pub fn new(url: Url, token: &str, password: Option<String>) -> Result<Self> {
+        let mut authorization = reqwest::header::HeaderValue::from_str(&format!("token {token}"))
+            .map_err(|_| Error::Forge("invalid forge token".into()))?;
+        authorization.set_sensitive(true);
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::AUTHORIZATION, authorization);
         Ok(Self {
             api: forgejo_api::Forgejo::new(Auth::Token(token), url.clone()).map_err(err)?,
+            http: reqwest::Client::builder()
+                .default_headers(headers)
+                .build()
+                .map_err(|error| Error::Forge(error.to_string()))?,
             url,
             password,
             me: OnceLock::new(),
@@ -141,6 +151,7 @@ impl Forgejo {
                         "path": comment.path,
                         "line": comment.position,
                         "body": text(&comment.body),
+                        "resolved": comment.resolver.is_some(),
                     })
                 })
                 .collect();
@@ -400,6 +411,56 @@ impl Forgejo {
         .await?;
         Ok(())
     }
+
+    pub async fn resolve_review_comment(&self, thread: &ThreadKey, comment_id: u64) -> Result<()> {
+        let Subject::Pr(pr) = thread.subject else {
+            return Err(Error::Forge(
+                "review comments require a pull request".into(),
+            ));
+        };
+        let comment_id_i64 = i64::try_from(comment_id)
+            .map_err(|_| Error::Forge("review comment id is too large".into()))?;
+        let (owner, name) = own(&thread.repo);
+        let (_, reviews) = go(self.api.repo_list_pull_reviews(owner, name, pr as i64)).await?;
+        let mut found = false;
+        for review_id in reviews.into_iter().filter_map(|review| review.id) {
+            let comments = go(self
+                .api
+                .repo_get_pull_review_comments(owner, name, pr as i64, review_id))
+            .await?;
+            if comments
+                .iter()
+                .any(|comment| comment.id == Some(comment_id_i64))
+            {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err(Error::Forge(format!(
+                "review comment {comment_id} not found on {thread}"
+            )));
+        }
+        let url = self
+            .url
+            .join(&format!(
+                "api/v1/repos/{owner}/{name}/pulls/comments/{comment_id}/resolve"
+            ))
+            .map_err(|error| Error::Forge(error.to_string()))?;
+        let response = self
+            .http
+            .post(url)
+            .send()
+            .await
+            .map_err(|error| Error::Forge(error.to_string()))?;
+        if response.status() != reqwest::StatusCode::NO_CONTENT {
+            return Err(Error::Forge(format!(
+                "could not resolve review comment {comment_id}: HTTP {}",
+                response.status()
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -438,6 +499,10 @@ impl Forge for Forgejo {
 
     async fn comment(&self, thread: &ThreadKey, body: &str, reply_to: Option<u64>) -> Result<u64> {
         Forgejo::comment(self, thread, body, reply_to).await
+    }
+
+    async fn resolve_review_comment(&self, thread: &ThreadKey, comment_id: u64) -> Result<()> {
+        Forgejo::resolve_review_comment(self, thread, comment_id).await
     }
 
     async fn submit_review(&self, repo: &RepoId, pr: u64, review: Review) -> Result<()> {

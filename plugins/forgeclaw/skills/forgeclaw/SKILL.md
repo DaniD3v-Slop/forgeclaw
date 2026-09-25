@@ -11,6 +11,7 @@ Subjects use `owner/repo#issue/N` or `owner/repo#pr/N`; repository searches use
 - Search existing issues before creating one. Any chat may open an issue or a pull request when asked.
 - For code changes, work on a branch, open a PR, and leave one informative comment on the originating subject when authorized.
 - For a review request, inspect the diff and use `forge_submit_review` with a concrete summary. For requested changes or failed CI, edit and push only when `head_owner` from `forge_read` is your forge username. Never open a replacement PR for an existing PR. When replying to an inline review comment, pass that comment's `id` from `forge_read` as `reply_to` to `forge_comment`.
+- After addressing an inline review comment, use `forge_resolve_review_comment` with that comment's id and the same PR subject. Check its `resolved` state with `forge_read`. Leave comments unresolved when the requested change is still outstanding.
 - To check CI on a pull request, use `forge_read` and inspect `ci_run`. It reports the latest run and job statuses, with logs from running or failed jobs when Forgejo provides them. Read it again for fresh progress.
 - For an assignment, acknowledge only after making progress; for a mentioned question, answer directly in the same subject.
 - Keep comments and reviews tied to the event subject. Existing branches may only be pushed from an authorized turn for the matching bot-owned pull request. Creating a new branch is allowed from any chat.

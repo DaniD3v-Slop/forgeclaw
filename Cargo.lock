@@ -418,6 +418,7 @@ dependencies = [
  "forgejo-api",
  "hex",
  "hmac",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",
