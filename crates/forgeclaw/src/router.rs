@@ -343,7 +343,10 @@ where
              request, then post exactly one informative subject comment. For a review request, \
              inspect the diff and submit the review. For failed CI or requested changes, fix and \
              push the existing branch only when forge_read says its head_owner is your forge \
-             username; never open a replacement PR. Do not only describe what you would do.",
+             username; never open a replacement PR. Answer inline review questions with a reply \
+             and leave those conversations unresolved for the reviewer, including in \
+             requested-changes reviews. Resolve only comments whose requested changes you made. \
+             Do not only describe what you would do.",
             kinds.join(", "),
             thread
         );

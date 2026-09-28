@@ -56,7 +56,7 @@ const tools = [
   {
     name: "forge_resolve_review_comment",
     label: "Resolve review conversation",
-    description: "Mark an addressed inline review conversation as resolved on the authorized pull request. Use an inline comment id from forge_read.",
+    description: "Resolve an inline review conversation after making its requested change. Leave question comments unresolved for the reviewer, even after answering. Use an inline comment id from forge_read.",
     parameters: object({ subject, comment_id: { type: "integer" } }, ["subject", "comment_id"]),
   },
   {
