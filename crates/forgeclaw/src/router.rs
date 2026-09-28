@@ -175,6 +175,7 @@ impl OpenClawCli {
     }
 
     async fn run(&self, session_key: &str, message: &str) -> Result<()> {
+        self.group_session(session_key).await?;
         let mut command = tokio::process::Command::new(&self.program);
         command
             .args([
@@ -192,9 +193,6 @@ impl OpenClawCli {
             command.env_remove(name);
         }
         let status = command.status().await?;
-        if let Err(error) = self.group_session(session_key).await {
-            eprintln!("could not group OpenClaw session: {error}");
-        }
         if status.success() {
             Ok(())
         } else {
@@ -205,34 +203,46 @@ impl OpenClawCli {
     }
 
     async fn group_session(&self, session_key: &str) -> Result<()> {
-        let params = session_group_params(session_key);
+        self.session_call(
+            "sessions.create",
+            json!({ "key": session_key, "category": "ForgeClaw" }),
+        )
+        .await?;
+        self.session_call("sessions.patch", session_group_params(session_key))
+            .await
+    }
+
+    async fn session_call(&self, method: &str, params: Value) -> Result<()> {
         let mut command = tokio::process::Command::new(&self.program);
-        command
-            .args([
-                "gateway",
-                "call",
-                "sessions.patch",
-                "--params",
-                &params,
-                "--json",
-            ])
-            .stdout(Stdio::null());
+        command.args([
+            "gateway",
+            "call",
+            method,
+            "--params",
+            &params.to_string(),
+            "--json",
+        ]);
         for name in &self.secret_envs {
             command.env_remove(name);
         }
-        let status = command.status().await?;
-        status.success().then_some(()).ok_or_else(|| {
-            forgeclaw_core::Error::Forge(format!("OpenClaw session grouping exited with {status}"))
-        })
+        let output = command.output().await?;
+        let response: Value = serde_json::from_slice(&output.stdout).map_err(|_| {
+            forgeclaw_core::Error::Forge(format!("OpenClaw {method} returned invalid JSON"))
+        })?;
+        if !output.status.success() || response["ok"] == false {
+            return Err(forgeclaw_core::Error::Forge(format!(
+                "OpenClaw {method} rejected session request"
+            )));
+        }
+        Ok(())
     }
 }
 
-fn session_group_params(session_key: &str) -> String {
+fn session_group_params(session_key: &str) -> Value {
     json!({
         "key": session_key,
         "category": "ForgeClaw",
     })
-    .to_string()
 }
 
 #[async_trait]
@@ -381,6 +391,8 @@ pub fn session_key(forge: &str, repo: &RepoId, thread: &ThreadKey) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
@@ -492,6 +504,28 @@ mod tests {
         let params = session_group_params("agent:main:forgejo/o/r#issue/7");
         assert_eq!(params["key"], "agent:main:forgejo/o/r#issue/7");
         assert_eq!(params["category"], "ForgeClaw");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejected_grouping_prevents_the_agent_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("openclaw");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\ncase \"$3\" in\n  sessions.create) echo '{\"ok\":true}';;\n  sessions.patch) echo '{\"ok\":false}';;\n  *) exit 99;;\nesac\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&program).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&program, permissions).unwrap();
+
+        let gateway = OpenClawCli::new(program, vec![]);
+        let error = gateway
+            .run("agent:main:forgejo/o/r#issue/7", "test")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("sessions.patch"));
     }
 
     #[derive(Clone, Default)]
