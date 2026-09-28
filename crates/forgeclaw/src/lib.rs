@@ -6,4 +6,5 @@
 
 pub mod grants;
 pub mod http_tools;
+pub mod outbox;
 pub mod router;

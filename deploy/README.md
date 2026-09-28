@@ -21,6 +21,14 @@ Then start the base stack:
 podman compose up -d
 ```
 
+Verified webhook deliveries are saved to
+`/home/node/.openclaw/forgeclaw-outbox.sqlite` in the persistent `openclaw_data`
+volume before ForgeClaw responds with `202`. Failed deliveries are retried
+automatically, including after a daemon restart. If storage is unavailable,
+ForgeClaw responds with `503` so Forgejo can redeliver. Processing is at least
+once: a crash after an OpenClaw turn succeeds but before its completion is
+recorded can repeat that turn.
+
 The OpenClaw configuration and ForgeClaw plugin path are seeded automatically
 on the first start. ForgeClaw does not add a permanent Control UI navigation
 item. Open its occasional-use trigger editor at

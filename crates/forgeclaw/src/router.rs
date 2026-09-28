@@ -354,7 +354,11 @@ where
             .expect("router inserted the active grant for this session");
         let revoke = self.forge.revoke_token(grant.token()).await;
         submit?;
-        revoke
+        // A failed cleanup must not replay a turn that OpenClaw already ran.
+        if let Err(error) = revoke {
+            eprintln!("could not revoke completed turn token: {error}");
+        }
+        Ok(())
     }
 
     pub fn grants(&self) -> &Arc<GrantStore> {

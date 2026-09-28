@@ -13,11 +13,13 @@ use axum::routing::{get, post};
 use axum::{Router, response::IntoResponse};
 use forgeclaw::grants::GrantStore;
 use forgeclaw::http_tools::ToolServer;
+use forgeclaw::outbox::Outbox;
 use forgeclaw::router::{OpenClawCli, Router as ForgeRouter, TriggerRule, WebhookForge};
 use forgeclaw_core::{Forge, Result, ScopedToken};
 use forgeclaw_forgejo::{Forgejo, webhook_events};
 use serde::Deserialize;
 use serde_json::Value;
+use tokio::sync::Notify;
 use url::Url;
 
 #[derive(Deserialize)]
@@ -108,6 +110,8 @@ struct WebhookState {
     router: Arc<AppRouter>,
     config_path: PathBuf,
     secret: Arc<str>,
+    outbox: Arc<Outbox>,
+    wake: Arc<Notify>,
 }
 
 async fn webhook(
@@ -132,29 +136,61 @@ async fn webhook(
     if events.is_empty() {
         return StatusCode::NO_CONTENT;
     }
-    tokio::spawn(async move {
-        let result = async {
-            let config: OpenClawConfig =
-                serde_json::from_slice(&std::fs::read(&state.config_path)?)
-                    .map_err(|error| forgeclaw_core::Error::Config(error.to_string()))?;
-            let rules = config
-                .forgeclaw()?
-                .ok_or_else(|| {
-                    forgeclaw_core::Error::Config(
-                        "plugins.entries.forgeclaw.config is required".into(),
-                    )
-                })?
-                .trigger;
-            TriggerRule::validate_all(&rules)?;
-            state.router.replace_rules(rules).await;
-            state.router.deliver(events).await
-        }
-        .await;
-        if let Err(error) = result {
-            eprintln!("webhook routing failed: {error}");
-        }
-    });
+    // The signature identifies the signed payload across Forgejo redeliveries.
+    // A 202 means the normalized events have reached durable storage.
+    if let Err(error) = state.outbox.enqueue(&signature, &events) {
+        eprintln!("webhook could not be queued: {error}");
+        return StatusCode::SERVICE_UNAVAILABLE;
+    }
+    state.wake.notify_one();
     StatusCode::ACCEPTED
+}
+
+async fn drain_outbox(state: WebhookState) {
+    loop {
+        match state.outbox.ready() {
+            Ok(Some(pending)) => {
+                let result = async {
+                    let config: OpenClawConfig =
+                        serde_json::from_slice(&std::fs::read(&state.config_path)?)
+                            .map_err(|error| forgeclaw_core::Error::Config(error.to_string()))?;
+                    let rules = config
+                        .forgeclaw()?
+                        .ok_or_else(|| {
+                            forgeclaw_core::Error::Config(
+                                "plugins.entries.forgeclaw.config is required".into(),
+                            )
+                        })?
+                        .trigger;
+                    TriggerRule::validate_all(&rules)?;
+                    state.router.replace_rules(rules).await;
+                    state.router.deliver(pending.events).await
+                }
+                .await;
+                let saved = match result {
+                    Ok(_) => state.outbox.complete(&pending.id),
+                    Err(error) => {
+                        eprintln!("webhook routing failed; retrying: {error}");
+                        state.outbox.retry(&pending.id, pending.attempts)
+                    }
+                };
+                if let Err(error) = saved {
+                    eprintln!("webhook outbox update failed: {error}");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            }
+            Ok(None) => {
+                tokio::select! {
+                    () = state.wake.notified() => {},
+                    () = tokio::time::sleep(Duration::from_secs(5)) => {},
+                }
+            }
+            Err(error) => {
+                eprintln!("webhook outbox read failed: {error}");
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
+    }
 }
 
 #[tokio::main]
@@ -195,6 +231,18 @@ async fn main() -> Result<()> {
         grants.clone(),
         Duration::from_secs(daemon.grant_ttl_secs),
     ));
+    let outbox_path = env::var("FORGECLAW_OUTBOX_PATH")
+        .unwrap_or_else(|_| "/home/node/.openclaw/forgeclaw-outbox.sqlite".into());
+    let outbox = Arc::new(Outbox::open(outbox_path)?);
+    let wake = Arc::new(Notify::new());
+    let webhook_state = WebhookState {
+        router,
+        config_path: config_path.into(),
+        secret: secret.into(),
+        outbox,
+        wake,
+    };
+    tokio::spawn(drain_outbox(webhook_state.clone()));
     let tools = ToolServer::new(
         daemon.forge.url,
         forge,
@@ -207,11 +255,7 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .route("/healthz", get(|| async { StatusCode::OK }))
         .route("/webhook", post(webhook))
-        .with_state(WebhookState {
-            router,
-            config_path: config_path.into(),
-            secret: secret.into(),
-        })
+        .with_state(webhook_state)
         .merge(tools);
     let listener = tokio::net::TcpListener::bind(daemon.listen).await?;
     axum::serve(listener, app)
