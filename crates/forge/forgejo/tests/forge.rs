@@ -219,7 +219,7 @@ async fn pull_request_context_exposes_head_ownership() {
     .await;
     Mock::given(method("GET"))
         .and(path("/api/v1/repos/o/r/pulls/7.diff"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("diff"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("diff".repeat(20_000)))
         .mount(&server)
         .await;
     mock(
@@ -278,6 +278,18 @@ async fn pull_request_context_exposes_head_ownership() {
     assert_eq!(context["ci_run"]["jobs"][0]["log"], "compiling\n");
     assert_eq!(context["ci_run"]["jobs"][1]["status"], "waiting");
     assert_eq!(context["reviews"][0]["comments"][0]["resolved"], true);
+    assert!(context.get("diff").is_none());
+
+    let first = client(&server)
+        .diff_page(&thread(Subject::Pr(7)), 0)
+        .await
+        .unwrap();
+    assert_eq!(first.text.len(), 16 * 1024);
+    let second = client(&server)
+        .diff_page(&thread(Subject::Pr(7)), first.next_offset.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(second.text.len(), 16 * 1024);
 }
 
 #[tokio::test]

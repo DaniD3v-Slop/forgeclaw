@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -13,6 +14,7 @@ pub trait Forge: Send + Sync {
 
     async fn whoami(&self) -> Result<String>;
     async fn context(&self, thread: &ThreadKey) -> Result<Value>;
+    async fn diff_page(&self, thread: &ThreadKey, offset: usize) -> Result<DiffPage>;
     async fn ensure_fork(&self, repo: &RepoId) -> Result<RepoId>;
     async fn search_issues(&self, repo: &RepoId, query: &str) -> Result<Vec<IssueSummary>>;
     async fn create_issue(&self, repo: &RepoId, title: &str, body: &str) -> Result<u64>;
@@ -24,6 +26,12 @@ pub trait Forge: Send + Sync {
     /// Create and revoke the credential attached to one routed agent turn.
     async fn mint_token(&self, label: &str) -> Result<ScopedToken>;
     async fn revoke_token(&self, token: &ScopedToken) -> Result<()>;
+}
+
+#[derive(Debug, Serialize)]
+pub struct DiffPage {
+    pub text: String,
+    pub next_offset: Option<usize>,
 }
 
 #[derive(Clone)]

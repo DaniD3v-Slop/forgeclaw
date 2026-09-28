@@ -9,6 +9,7 @@
   "contracts": {
     "tools": [
       "forge_read",
+      "forge_read_diff",
       "forge_search_issues",
       "forge_comment",
       "forge_resolve_review_comment",

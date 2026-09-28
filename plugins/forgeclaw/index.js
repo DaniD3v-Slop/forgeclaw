@@ -34,8 +34,14 @@ const tools = [
   {
     name: "forge_read",
     label: "Read forge subject",
-    description: "Read a forge issue or pull request, including the latest pull request CI run, job statuses, and available live logs.",
+    description: "Read issue or pull request metadata, review comments, branch ownership, and CI status. Use forge_read_diff separately for a pull request diff.",
     parameters: object({ subject }, ["subject"]),
+  },
+  {
+    name: "forge_read_diff",
+    label: "Read pull request diff",
+    description: "Read up to 16 KiB of a pull request diff. Pass next_offset from the previous result to continue.",
+    parameters: object({ subject, offset: { type: "integer", minimum: 0 } }, ["subject"]),
   },
   {
     name: "forge_search_issues",

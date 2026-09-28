@@ -135,6 +135,24 @@ async fn tool_call(
                 .map_err(|error| error.to_string())?;
             serde_json::to_string(&context).map_err(|error| error.to_string())?
         }
+        "forge_read_diff" => {
+            let thread = subject(arguments)?;
+            let offset = arguments
+                .get("offset")
+                .map(|value| {
+                    value
+                        .as_u64()
+                        .and_then(|number| usize::try_from(number).ok())
+                })
+                .unwrap_or(Some(0))
+                .ok_or("offset must be a non-negative integer")?;
+            let page = server
+                .forge
+                .diff_page(&thread, offset)
+                .await
+                .map_err(|error| error.to_string())?;
+            serde_json::to_string(&page).map_err(|error| error.to_string())?
+        }
         "forge_search_issues" => {
             let repo = repo(arguments)?;
             let query = string(arguments, "query")?;

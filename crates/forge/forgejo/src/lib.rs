@@ -10,8 +10,8 @@ use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use forgeclaw_core::{
-    Error, Forge, IssueSummary, NewPr, RepoId, Result, Review, ScopedToken, Subject, ThreadKey,
-    Verdict,
+    DiffPage, Error, Forge, IssueSummary, NewPr, RepoId, Result, Review, ScopedToken, Subject,
+    ThreadKey, Verdict,
 };
 use forgejo_api::structs::{ActionRun, IssueListIssuesQuery, StateType};
 use forgejo_api::{ApiErrorKind, Auth, ForgejoError};
@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 use url::Url;
 
 const EXCERPT_MAX: usize = 64 * 1024;
+const DIFF_PAGE_MAX: usize = 16 * 1024;
 const TOKEN_SCOPES: &[&str] = &["write:repository", "write:issue", "read:user"];
 pub struct Forgejo {
     api: forgejo_api::Forgejo,
@@ -240,20 +241,39 @@ impl Forgejo {
                 .and_then(|base| base.r#ref.clone())
                 .unwrap_or_default()
                 .into();
-            let diff = self.api.repo_download_pull_diff_or_patch(
-                owner,
-                name,
-                number as i64,
-                "diff",
-                Default::default(),
-            );
-            context["diff"] = clip(go(diff).await?).into();
             if let Some(run) = self.run_context(&thread.repo, number).await {
                 context["ci_run"] = run;
             }
             context["reviews"] = json!(self.reviews(owner, name, number as i64).await?);
         }
         Ok(context)
+    }
+
+    pub async fn diff_page(&self, thread: &ThreadKey, offset: usize) -> Result<DiffPage> {
+        let Subject::Pr(number) = thread.subject else {
+            return Err(Error::Forge("diff requires a pull request subject".into()));
+        };
+        let (owner, name) = own(&thread.repo);
+        let diff = go(self.api.repo_download_pull_diff_or_patch(
+            owner,
+            name,
+            number as i64,
+            "diff",
+            Default::default(),
+        ))
+        .await?;
+        if !diff.is_char_boundary(offset) {
+            return Err(Error::Forge("diff offset is not a UTF-8 boundary".into()));
+        }
+        let end = diff.len().min(offset.saturating_add(DIFF_PAGE_MAX));
+        let mut end = end;
+        while !diff.is_char_boundary(end) {
+            end -= 1;
+        }
+        Ok(DiffPage {
+            text: diff[offset..end].into(),
+            next_offset: (end < diff.len()).then_some(end),
+        })
     }
 
     pub async fn search_issues(&self, repo: &RepoId, query: &str) -> Result<Vec<IssueSummary>> {
@@ -481,6 +501,10 @@ impl Forge for Forgejo {
         Forgejo::context(self, thread).await
     }
 
+    async fn diff_page(&self, thread: &ThreadKey, offset: usize) -> Result<DiffPage> {
+        Forgejo::diff_page(self, thread, offset).await
+    }
+
     async fn ensure_fork(&self, repo: &RepoId) -> Result<RepoId> {
         Forgejo::ensure_fork(self, repo).await
     }
@@ -594,17 +618,6 @@ fn pr_from_payload(payload: &str) -> Option<u64> {
         .ok()?
         .pointer("/pull_request/number")?
         .as_u64()
-}
-
-fn clip(mut value: String) -> String {
-    if value.len() > EXCERPT_MAX {
-        let mut end = EXCERPT_MAX;
-        while !value.is_char_boundary(end) {
-            end -= 1;
-        }
-        value.truncate(end);
-    }
-    value
 }
 
 fn clip_tail_to(mut value: String, limit: usize) -> String {
