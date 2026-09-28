@@ -371,9 +371,9 @@ where
 }
 
 /// OpenClaw requires the `agent:<id>:` prefix; the rest is a stable forge
-/// thread identity, so a later event resumes this same agent session.
+/// thread identity. The ForgeClaw session group supplies the product name.
 pub fn session_key(forge: &str, repo: &RepoId, thread: &ThreadKey) -> String {
-    format!("agent:main:forgeclaw:{forge}/{repo}#{}", thread.subject)
+    format!("agent:main:{forge}/{repo}#{}", thread.subject)
 }
 
 #[cfg(test)]
@@ -480,17 +480,14 @@ mod tests {
         };
         assert_eq!(
             session_key("forgejo", &thread.repo, &thread),
-            "agent:main:forgeclaw:forgejo/octo/repo#issue/7"
+            "agent:main:forgejo/octo/repo#issue/7"
         );
     }
 
     #[test]
     fn forge_sessions_are_grouped_with_structured_json() {
-        let params: Value = serde_json::from_str(&session_group_params(
-            "agent:main:forgeclaw:forgejo/o/r#issue/7",
-        ))
-        .unwrap();
-        assert_eq!(params["key"], "agent:main:forgeclaw:forgejo/o/r#issue/7");
+        let params = session_group_params("agent:main:forgejo/o/r#issue/7");
+        assert_eq!(params["key"], "agent:main:forgejo/o/r#issue/7");
         assert_eq!(params["category"], "ForgeClaw");
     }
 
@@ -582,7 +579,7 @@ mod tests {
         assert_eq!(minted.load(Ordering::SeqCst), 1);
         assert_eq!(revoked.load(Ordering::SeqCst), 1);
         assert!(!router.grants().can_write(
-            &SessionKey::new("agent:main:forgeclaw:forgejo/octo/repo#issue/7"),
+            &SessionKey::new("agent:main:forgejo/octo/repo#issue/7"),
             &event(json!({})).thread(),
         ));
     }

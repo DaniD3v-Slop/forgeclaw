@@ -142,13 +142,13 @@ mod tests {
         original.repo.owner = "SrinoHosting".into();
         original.repo.name = "Infra".into();
         store.insert(
-            SessionKey::new("agent:main:forgeclaw:forgejo/SrinoHosting/Infra#issue/2"),
+            SessionKey::new("agent:main:forgejo/SrinoHosting/Infra#issue/2"),
             original,
             token(),
             Duration::from_secs(60),
         );
 
-        let session = SessionKey::new("agent:main:forgeclaw:forgejo/srinohosting/infra#issue/2");
+        let session = SessionKey::new("agent:main:forgejo/srinohosting/infra#issue/2");
         let mut requested = thread(2);
         requested.repo.owner = "srinohosting".into();
         requested.repo.name = "infra".into();

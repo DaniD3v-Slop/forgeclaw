@@ -23,7 +23,7 @@ owns session queueing and execution after the background submission succeeds.
 The stable session key is:
 
 ```text
-agent:main:forgeclaw:<forge>/<owner>/<repo>#<issue-or-pr>
+agent:main:<forge>/<owner>/<repo>#<issue-or-pr>
 ```
 
 During the turn, the daemon grants that exact session permission to write only
