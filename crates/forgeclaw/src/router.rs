@@ -49,6 +49,7 @@ impl TriggerRule {
                 "issue.assigned" => &["assignees", "assignee", "author"],
                 "pull_request.review_requested" => &["reviewer", "author"],
                 "pull_request.changes_requested" => &["reviewer", "body"],
+                "pull_request.review_commented" => &["reviewer", "pr_author", "body"],
                 "ci.run_completed" => &["conclusion", "pr_author", "workflow"],
                 "pull_request.opened" => &["author"],
                 _ => return Err(config_error(format!("unknown trigger event: {}", rule.on))),
@@ -350,8 +351,8 @@ where
              question. Act now according to the forgeclaw skill using the forge tools. Read the \
              exact subject first. For a mentioned question, post exactly one direct answer on \
              that subject. For requested code work, make the change, push a branch, open a pull \
-             request, then post exactly one informative subject comment. For a review request, \
-             inspect the diff and submit the review. For failed CI or requested changes, fix and \
+             request, then post exactly one informative subject comment. For a comment review on your PR, read the relevant review with forge_read_review and answer its questions or make requested edits without posting status chatter. For a review request, \
+             inspect the diff and submit the review. For failed CI or requested changes, read the relevant review comments with forge_read_review or CI logs with forge_read_ci, then fix and \
              push the existing branch only when forge_read says its head_owner is your forge \
              username; never open a replacement PR. Answer inline review questions with a reply \
              and leave those conversations unresolved for the reviewer, including in \
@@ -426,6 +427,24 @@ mod tests {
             &event(json!({"mentions": ["forgeclaw"], "author": "forgeclaw"})),
             "forgeclaw"
         ));
+    }
+
+    #[test]
+    fn comment_review_on_bot_pr_matches_without_assignment_or_mention() {
+        let rule: TriggerRule = serde_json::from_value(json!({
+            "on": "pull_request.review_commented",
+            "filter": {"pr_author": "@me", "reviewer": "!@me"}
+        }))
+        .unwrap();
+        let mut review = event(
+            json!({"pr_author": "forgeclaw", "reviewer": "alice", "body": "What does this do?"}),
+        );
+        review.kind = "pull_request.review_commented".into();
+        review.subject = Subject::Pr(7);
+        TriggerRule::validate_all(std::slice::from_ref(&rule)).unwrap();
+        assert!(rule.matches(&review, "forgeclaw"));
+        review.payload["pr_author"] = json!("alice");
+        assert!(!rule.matches(&review, "forgeclaw"));
     }
 
     #[test]

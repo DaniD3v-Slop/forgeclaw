@@ -110,6 +110,12 @@ async fn reads_issue_context() {
         .unwrap();
     assert_eq!(context["title"], "Broken thing");
     assert_eq!(context["comments"][0]["author"], "bob");
+    let comment = client(&server)
+        .comment_page(&thread(Subject::Issue(7)), 0, 0)
+        .await
+        .unwrap();
+    assert_eq!(comment["body"], "more");
+    assert!(comment["next_offset"].is_null());
 }
 
 #[tokio::test]
@@ -190,7 +196,7 @@ async fn pull_request_context_exposes_head_ownership() {
         "GET",
         "/api/v1/repos/o/r/issues/7",
         200,
-        json!({"number": 7, "title": "Change", "state": "open"}),
+        json!({"number": 7, "title": "Change", "body": "x".repeat(50_000), "state": "open"}),
     )
     .await;
     mock(
@@ -260,9 +266,19 @@ async fn pull_request_context_exposes_head_ownership() {
     mock(
         &server,
         "GET",
+        "/api/v1/repos/o/r/pulls/7/reviews/11",
+        200,
+        json!({"id": 11, "body": "Review", "user": {"login": "bob"}}),
+    )
+    .await;
+    mock(
+        &server,
+        "GET",
         "/api/v1/repos/o/r/pulls/7/reviews/11/comments",
         200,
-        json!([{"id": 42, "body": "Fixed?", "resolver": {"login": "alice"}, "user": {"login": "bob"}}]),
+        json!([{"id": 42, "body": "Fixed?", "path": "src/lib.rs", "position": 3,
+                "diff_hunk": "@@ -10,2 +10,3 @@\n context\n+new line",
+                "resolver": {"login": "alice"}, "user": {"login": "bob"}}]),
     )
     .await;
 
@@ -271,14 +287,41 @@ async fn pull_request_context_exposes_head_ownership() {
         .await
         .unwrap();
     assert_eq!(context["head_owner"], "alice");
+    assert_eq!(context["body"].as_str().unwrap().len(), 8 * 1024);
+    assert_eq!(context["body_truncated"], true);
+    let second_body_page = client(&server)
+        .body_page(&thread(Subject::Pr(7)), 8 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(second_body_page.text.len(), 8 * 1024);
     assert_eq!(context["head_repo"], "alice/r");
     assert_eq!(context["head_branch"], "feature");
     assert_eq!(context["ci_run"]["id"], 42);
     assert_eq!(context["ci_run"]["status"], "running");
-    assert_eq!(context["ci_run"]["jobs"][0]["log"], "compiling\n");
-    assert_eq!(context["ci_run"]["jobs"][1]["status"], "waiting");
-    assert_eq!(context["reviews"][0]["comments"][0]["resolved"], true);
+    assert!(context["ci_run"].get("jobs").is_none());
+    assert_eq!(context["reviews"][0]["id"], 11);
+    assert!(context["reviews"][0].get("comments").is_none());
     assert!(context.get("diff").is_none());
+
+    let ci = client(&server)
+        .ci_context(&thread(Subject::Pr(7)))
+        .await
+        .unwrap();
+    assert_eq!(ci["jobs"][0]["log"], "compiling\n");
+    assert_eq!(ci["jobs"][1]["status"], "waiting");
+
+    let review = client(&server)
+        .review_page(&thread(Subject::Pr(7)), 11, 0)
+        .await
+        .unwrap();
+    assert_eq!(review["comments"][0]["id"], 42);
+    assert_eq!(review["comments"][0]["resolved"], true);
+    assert_eq!(review["comments"][0]["path"], "src/lib.rs");
+    assert_eq!(review["comments"][0]["hunk_new_start"], 10);
+    assert_eq!(
+        review["comments"][0]["diff_hunk"],
+        "@@ -10,2 +10,3 @@\n context\n+new line"
+    );
 
     let first = client(&server)
         .diff_page(&thread(Subject::Pr(7)), 0)

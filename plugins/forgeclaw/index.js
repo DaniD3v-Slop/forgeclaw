@@ -16,6 +16,7 @@ const EVENT_FIELDS = {
   "issue.assigned": new Set(["assignees", "author"]),
   "pull_request.review_requested": new Set(["reviewer", "author"]),
   "pull_request.changes_requested": new Set(["reviewer", "body"]),
+  "pull_request.review_commented": new Set(["reviewer", "pr_author", "body"]),
   "ci.run_completed": new Set(["conclusion", "pr_author", "workflow"]),
   "pull_request.opened": new Set(["author"]),
 };
@@ -34,7 +35,31 @@ const tools = [
   {
     name: "forge_read",
     label: "Read forge subject",
-    description: "Read issue or pull request metadata, review comments, branch ownership, and CI status. Use forge_read_diff separately for a pull request diff.",
+    description: "Read compact issue or PR metadata, recent comments and review summaries, branch ownership, and CI status. Use forge_read_review for inline comments, forge_read_body for long descriptions, and forge_read_ci for logs.",
+    parameters: object({ subject }, ["subject"]),
+  },
+  {
+    name: "forge_read_review",
+    label: "Read pull request review",
+    description: "Read one review and up to five inline comments with short diff hunks and file references. Use the review id from forge_read and pass next_offset for more comments.",
+    parameters: object({ subject, review_id: { type: "integer", minimum: 1 }, offset: { type: "integer", minimum: 0 } }, ["subject", "review_id"]),
+  },
+  {
+    name: "forge_read_body",
+    label: "Read forge description",
+    description: "Read an issue or PR description in 8 KiB pages. Pass next_offset to continue.",
+    parameters: object({ subject, offset: { type: "integer", minimum: 0 } }, ["subject"]),
+  },
+  {
+    name: "forge_read_comment",
+    label: "Read discussion comment",
+    description: "Read one issue or PR discussion comment, newest first. Pass next_offset for older comments and next_body_offset as body_offset for the rest of a long comment.",
+    parameters: object({ subject, offset: { type: "integer", minimum: 0 }, body_offset: { type: "integer", minimum: 0 } }, ["subject"]),
+  },
+  {
+    name: "forge_read_ci",
+    label: "Read pull request CI",
+    description: "Read CI jobs and recent log excerpts for a pull request when needed.",
     parameters: object({ subject }, ["subject"]),
   },
   {

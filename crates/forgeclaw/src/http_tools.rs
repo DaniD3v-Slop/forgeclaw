@@ -135,17 +135,52 @@ async fn tool_call(
                 .map_err(|error| error.to_string())?;
             serde_json::to_string(&context).map_err(|error| error.to_string())?
         }
+        "forge_read_review" => {
+            let thread = subject(arguments)?;
+            let review_id = arguments
+                .get("review_id")
+                .and_then(Value::as_u64)
+                .ok_or("missing integer field: review_id")?;
+            let offset = offset(arguments)?;
+            let page = server
+                .forge
+                .review_page(&thread, review_id, offset)
+                .await
+                .map_err(|error| error.to_string())?;
+            serde_json::to_string(&page).map_err(|error| error.to_string())?
+        }
+        "forge_read_body" => {
+            let thread = subject(arguments)?;
+            let page = server
+                .forge
+                .body_page(&thread, offset(arguments)?)
+                .await
+                .map_err(|error| error.to_string())?;
+            serde_json::to_string(&page).map_err(|error| error.to_string())?
+        }
+        "forge_read_comment" => {
+            let thread = subject(arguments)?;
+            let offset = offset(arguments)?;
+            let body_offset = optional_offset(arguments, "body_offset")?;
+            let page = server
+                .forge
+                .comment_page(&thread, offset, body_offset)
+                .await
+                .map_err(|error| error.to_string())?;
+            serde_json::to_string(&page).map_err(|error| error.to_string())?
+        }
+        "forge_read_ci" => {
+            let thread = subject(arguments)?;
+            let context = server
+                .forge
+                .ci_context(&thread)
+                .await
+                .map_err(|error| error.to_string())?;
+            serde_json::to_string(&context).map_err(|error| error.to_string())?
+        }
         "forge_read_diff" => {
             let thread = subject(arguments)?;
-            let offset = arguments
-                .get("offset")
-                .map(|value| {
-                    value
-                        .as_u64()
-                        .and_then(|number| usize::try_from(number).ok())
-                })
-                .unwrap_or(Some(0))
-                .ok_or("offset must be a non-negative integer")?;
+            let offset = offset(arguments)?;
             let page = server
                 .forge
                 .diff_page(&thread, offset)
@@ -368,6 +403,22 @@ async fn tool_call(
         other => return Err(format!("unknown forge tool: {other}")),
     };
     Ok(json!({"content": [{"type": "text", "text": text}]}))
+}
+
+fn offset(arguments: &Value) -> Result<usize, String> {
+    optional_offset(arguments, "offset")
+}
+
+fn optional_offset(arguments: &Value, name: &str) -> Result<usize, String> {
+    arguments
+        .get(name)
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|number| usize::try_from(number).ok())
+        })
+        .unwrap_or(Some(0))
+        .ok_or_else(|| format!("{name} must be a non-negative integer"))
 }
 
 async fn require_bot_owned_pr(

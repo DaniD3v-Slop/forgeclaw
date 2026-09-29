@@ -9,6 +9,10 @@
   "contracts": {
     "tools": [
       "forge_read",
+      "forge_read_review",
+      "forge_read_body",
+      "forge_read_comment",
+      "forge_read_ci",
       "forge_read_diff",
       "forge_search_issues",
       "forge_comment",
@@ -56,6 +60,7 @@
                 "issue.assigned",
                 "pull_request.review_requested",
                 "pull_request.changes_requested",
+                "pull_request.review_commented",
                 "ci.run_completed",
                 "pull_request.opened"
               ]

@@ -18,8 +18,10 @@ use forgejo_api::{ApiErrorKind, Auth, ForgejoError};
 use serde_json::{Value, json};
 use url::Url;
 
-const EXCERPT_MAX: usize = 64 * 1024;
+const EXCERPT_MAX: usize = 8 * 1024;
 const DIFF_PAGE_MAX: usize = 16 * 1024;
+const BODY_PAGE_MAX: usize = 8 * 1024;
+const REVIEW_COMMENTS_PAGE: usize = 5;
 const TOKEN_SCOPES: &[&str] = &["write:repository", "write:issue", "read:user"];
 pub struct Forgejo {
     api: forgejo_api::Forgejo,
@@ -134,39 +136,73 @@ impl Forgejo {
 
     async fn reviews(&self, owner: &str, name: &str, pr: i64) -> Result<Vec<Value>> {
         let (_, reviews) = go(self.api.repo_list_pull_reviews(owner, name, pr)).await?;
-        let mut result = Vec::new();
-        for review in reviews {
-            let Some(review_id) = review.id else {
-                continue;
-            };
-            let comments = go(self
-                .api
-                .repo_get_pull_review_comments(owner, name, pr, review_id))
-            .await?;
-            let inline: Vec<Value> = comments
-                .iter()
-                .map(|comment| {
-                    json!({
-                        "id": comment.id,
-                        "author": login(&comment.user),
-                        "path": comment.path,
-                        "line": comment.position,
-                        "body": text(&comment.body),
-                        "resolved": comment.resolver.is_some(),
-                    })
-                })
-                .collect();
-            let body = text(&review.body);
-            if !body.is_empty() || !inline.is_empty() {
-                result.push(json!({
+        Ok(reviews
+            .iter()
+            .rev()
+            .take(3)
+            .map(|review| {
+                json!({
+                    "id": review.id,
                     "author": login(&review.user),
                     "state": review.state,
-                    "body": body,
-                    "comments": inline,
-                }));
-            }
-        }
-        Ok(result)
+                    "body": excerpt(&text(&review.body), 2048),
+                    "comments_count": review.comments_count,
+                })
+            })
+            .collect())
+    }
+
+    pub async fn review_page(
+        &self,
+        thread: &ThreadKey,
+        review_id: u64,
+        offset: usize,
+    ) -> Result<Value> {
+        let Subject::Pr(number) = thread.subject else {
+            return Err(Error::Forge(
+                "review requires a pull request subject".into(),
+            ));
+        };
+        let review_id =
+            i64::try_from(review_id).map_err(|_| Error::Forge("review id is too large".into()))?;
+        let (owner, name) = own(&thread.repo);
+        let review = go(self
+            .api
+            .repo_get_pull_review(owner, name, number as i64, review_id))
+        .await?;
+        let comments =
+            go(self
+                .api
+                .repo_get_pull_review_comments(owner, name, number as i64, review_id))
+            .await?;
+        let inline: Vec<Value> = comments
+            .iter()
+            .skip(offset)
+            .take(REVIEW_COMMENTS_PAGE)
+            .map(|comment| {
+                let hunk = text(&comment.diff_hunk);
+                let (hunk_old_start, hunk_new_start) = hunk_lines(&hunk);
+                json!({
+                    "id": comment.id,
+                    "author": login(&comment.user),
+                    "path": comment.path,
+                    "hunk_old_start": hunk_old_start,
+                    "hunk_new_start": hunk_new_start,
+                    "diff_position": comment.position,
+                    "body": text(&comment.body),
+                    "resolved": comment.resolver.is_some(),
+                    "diff_hunk": excerpt_tail(&hunk, 1200),
+                })
+            })
+            .collect();
+        Ok(json!({
+            "id": review.id,
+            "author": login(&review.user),
+            "state": review.state,
+            "body": text(&review.body),
+            "comments": inline,
+            "next_offset": (offset + REVIEW_COMMENTS_PAGE < comments.len()).then_some(offset + REVIEW_COMMENTS_PAGE),
+        }))
     }
 }
 
@@ -206,17 +242,21 @@ impl Forgejo {
                 .api
                 .issue_get_comments(owner, name, number as i64, Default::default()))
             .await?;
+        let comment_count = comments.len();
         let comments: Vec<Value> = comments
-            .iter()
-            .map(|comment| json!({"author": login(&comment.user), "body": text(&comment.body)}))
+            .iter().rev().take(3)
+            .map(|comment| json!({"id": comment.id, "author": login(&comment.user), "body": excerpt(&text(&comment.body), 2048)}))
             .collect();
+        let body = text(&issue.body);
         let mut context = json!({
             "title": text(&issue.title),
-            "body": text(&issue.body),
+            "body": excerpt(&body, BODY_PAGE_MAX),
+            "body_truncated": body.len() > BODY_PAGE_MAX,
             "author": login(&issue.user),
             "state": issue.state,
             "url": issue.html_url,
             "comments": comments,
+            "comments_count": comment_count,
         });
         if let Subject::Pr(_) = thread.subject {
             let pull = go(self.api.repo_get_pull_request(owner, name, number as i64)).await?;
@@ -241,12 +281,57 @@ impl Forgejo {
                 .and_then(|base| base.r#ref.clone())
                 .unwrap_or_default()
                 .into();
-            if let Some(run) = self.run_context(&thread.repo, number).await {
-                context["ci_run"] = run;
+            if let Some(run) = self.latest_run(&thread.repo, number).await {
+                context["ci_run"] = json!({"id": run.id, "status": run.status, "url": run.html_url, "workflow": run.workflow_id});
             }
             context["reviews"] = json!(self.reviews(owner, name, number as i64).await?);
         }
         Ok(context)
+    }
+
+    pub async fn body_page(&self, thread: &ThreadKey, offset: usize) -> Result<DiffPage> {
+        let (owner, name) = own(&thread.repo);
+        let (Subject::Issue(number) | Subject::Pr(number)) = thread.subject;
+        let issue = go(self.api.issue_get_issue(owner, name, number as i64)).await?;
+        page(&text(&issue.body), offset, BODY_PAGE_MAX)
+    }
+
+    pub async fn comment_page(
+        &self,
+        thread: &ThreadKey,
+        offset: usize,
+        body_offset: usize,
+    ) -> Result<Value> {
+        let (owner, name) = own(&thread.repo);
+        let (Subject::Issue(number) | Subject::Pr(number)) = thread.subject;
+        let (_, comments) =
+            go(self
+                .api
+                .issue_get_comments(owner, name, number as i64, Default::default()))
+            .await?;
+        let comment = comments
+            .iter()
+            .rev()
+            .nth(offset)
+            .ok_or_else(|| Error::Forge("comment offset is outside the discussion".into()))?;
+        let body = page(&text(&comment.body), body_offset, BODY_PAGE_MAX)?;
+        Ok(json!({
+            "id": comment.id,
+            "author": login(&comment.user),
+            "body": body.text,
+            "next_body_offset": body.next_offset,
+            "next_offset": (offset + 1 < comments.len()).then_some(offset + 1),
+        }))
+    }
+
+    pub async fn ci_context(&self, thread: &ThreadKey) -> Result<Value> {
+        let Subject::Pr(number) = thread.subject else {
+            return Err(Error::Forge("CI requires a pull request subject".into()));
+        };
+        Ok(self
+            .run_context(&thread.repo, number)
+            .await
+            .unwrap_or(Value::Null))
     }
 
     pub async fn diff_page(&self, thread: &ThreadKey, offset: usize) -> Result<DiffPage> {
@@ -262,18 +347,7 @@ impl Forgejo {
             Default::default(),
         ))
         .await?;
-        if !diff.is_char_boundary(offset) {
-            return Err(Error::Forge("diff offset is not a UTF-8 boundary".into()));
-        }
-        let end = diff.len().min(offset.saturating_add(DIFF_PAGE_MAX));
-        let mut end = end;
-        while !diff.is_char_boundary(end) {
-            end -= 1;
-        }
-        Ok(DiffPage {
-            text: diff[offset..end].into(),
-            next_offset: (end < diff.len()).then_some(end),
-        })
+        page(&diff, offset, DIFF_PAGE_MAX)
     }
 
     pub async fn search_issues(&self, repo: &RepoId, query: &str) -> Result<Vec<IssueSummary>> {
@@ -501,6 +575,32 @@ impl Forge for Forgejo {
         Forgejo::context(self, thread).await
     }
 
+    async fn review_page(
+        &self,
+        thread: &ThreadKey,
+        review_id: u64,
+        offset: usize,
+    ) -> Result<Value> {
+        Forgejo::review_page(self, thread, review_id, offset).await
+    }
+
+    async fn body_page(&self, thread: &ThreadKey, offset: usize) -> Result<DiffPage> {
+        Forgejo::body_page(self, thread, offset).await
+    }
+
+    async fn comment_page(
+        &self,
+        thread: &ThreadKey,
+        offset: usize,
+        body_offset: usize,
+    ) -> Result<Value> {
+        Forgejo::comment_page(self, thread, offset, body_offset).await
+    }
+
+    async fn ci_context(&self, thread: &ThreadKey) -> Result<Value> {
+        Forgejo::ci_context(self, thread).await
+    }
+
     async fn diff_page(&self, thread: &ThreadKey, offset: usize) -> Result<DiffPage> {
         Forgejo::diff_page(self, thread, offset).await
     }
@@ -629,4 +729,51 @@ fn clip_tail_to(mut value: String, limit: usize) -> String {
         value.replace_range(..start, "");
     }
     value
+}
+
+fn excerpt(value: &str, limit: usize) -> &str {
+    let mut end = value.len().min(limit);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
+fn excerpt_tail(value: &str, limit: usize) -> &str {
+    let mut start = value.len().saturating_sub(limit);
+    while !value.is_char_boundary(start) {
+        start += 1;
+    }
+    &value[start..]
+}
+
+fn page(value: &str, offset: usize, limit: usize) -> Result<DiffPage> {
+    if offset > value.len() || !value.is_char_boundary(offset) {
+        return Err(Error::Forge(
+            "offset is outside the text or not a UTF-8 boundary".into(),
+        ));
+    }
+    let mut end = value.len().min(offset.saturating_add(limit));
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    Ok(DiffPage {
+        text: value[offset..end].into(),
+        next_offset: (end < value.len()).then_some(end),
+    })
+}
+
+fn hunk_lines(hunk: &str) -> (Option<u64>, Option<u64>) {
+    let Some(header) = hunk.lines().find(|line| line.starts_with("@@ ")) else {
+        return (None, None);
+    };
+    let mut fields = header.split_whitespace();
+    let _ = fields.next();
+    let parse = |prefix: char, value: Option<&str>| {
+        value
+            .and_then(|value| value.strip_prefix(prefix))
+            .and_then(|value| value.split(',').next())
+            .and_then(|value| value.parse::<u64>().ok())
+    };
+    (parse('-', fields.next()), parse('+', fields.next()))
 }

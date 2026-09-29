@@ -14,6 +14,16 @@ pub trait Forge: Send + Sync {
 
     async fn whoami(&self) -> Result<String>;
     async fn context(&self, thread: &ThreadKey) -> Result<Value>;
+    async fn review_page(&self, thread: &ThreadKey, review_id: u64, offset: usize)
+    -> Result<Value>;
+    async fn body_page(&self, thread: &ThreadKey, offset: usize) -> Result<DiffPage>;
+    async fn comment_page(
+        &self,
+        thread: &ThreadKey,
+        offset: usize,
+        body_offset: usize,
+    ) -> Result<Value>;
+    async fn ci_context(&self, thread: &ThreadKey) -> Result<Value>;
     async fn diff_page(&self, thread: &ThreadKey, offset: usize) -> Result<DiffPage>;
     async fn ensure_fork(&self, repo: &RepoId) -> Result<RepoId>;
     async fn search_issues(&self, repo: &RepoId, query: &str) -> Result<Vec<IssueSummary>>;

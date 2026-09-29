@@ -95,6 +95,16 @@ pub fn webhook_events(signature: &str, secret: &str, body: &[u8]) -> Result<Vec<
                 json!({"reviewer": reviewer, "body": body}),
             ));
         } else if review_type == "pull_request_review_comment" {
+            events.push(event(
+                &repo,
+                "pull_request.review_commented",
+                Subject::Pr(pr_number),
+                json!({
+                    "reviewer": reviewer,
+                    "pr_author": user(pr, "/user"),
+                    "body": body,
+                }),
+            ));
             events.push(comment_created(
                 &repo,
                 Subject::Pr(pr_number),
@@ -406,12 +416,14 @@ mod tests {
             "pull_request": {"number": 8, "user": {"login": "alice"}},
             "review": {
                 "type": "pull_request_review_comment",
-                "content": "hi @bot"
+                "content": "What does this do?"
             }
         }));
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].kind, "comment.created");
-        assert_eq!(events[0].payload["mentions"], json!(["bot"]));
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, "pull_request.review_commented");
+        assert_eq!(events[0].payload["pr_author"], "alice");
+        assert_eq!(events[1].kind, "comment.created");
+        assert_eq!(events[1].payload["mentions"], json!([]));
     }
 
     #[test]
