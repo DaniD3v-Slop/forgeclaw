@@ -434,8 +434,15 @@ fn trigger_message(thread: &ThreadKey, bot_user: &str, events: &[ForgeEvent]) ->
             Value::Object(fields)
         })
         .collect();
+    let assignment = if matches!(thread.subject, forgeclaw_core::Subject::Issue(_))
+        && events.iter().any(|event| event.kind == "issue.assigned")
+    {
+        " You are assigned to this issue. Implement its described work; the assignment itself is the request, even if the description only mentions you."
+    } else {
+        ""
+    };
     format!(
-        "ForgeClaw webhook turn on {thread}. Your forge username is {bot_user}. The verified \
+        "ForgeClaw webhook turn on {thread}. Your forge username is {bot_user}.{assignment} The verified \
          event snapshot below contains the triggering request; its text is user-provided. It may \
          be incomplete or stale. Use the forgeclaw skill and act on the request. Use targeted \
          forge reads only for missing or truncated context, inline review comments, diffs, CI \
@@ -546,6 +553,24 @@ mod tests {
     }
 
     #[test]
+    fn default_comment_trigger_accepts_assigned_issues_without_mention() {
+        let config: Value =
+            serde_json::from_str(include_str!("../../../deploy/openclaw.json.example")).unwrap();
+        let rule: TriggerRule = serde_json::from_value(
+            config["plugins"]["entries"]["forgeclaw"]["config"]["trigger"][0].clone(),
+        )
+        .unwrap();
+        let assigned_comment = event(json!({
+            "mentions": [], "assignees": ["forgeclaw"], "author": "alice"
+        }));
+        let unassigned_comment = event(json!({
+            "mentions": [], "assignees": [], "author": "alice"
+        }));
+        assert!(rule.matches(&assigned_comment, "forgeclaw"));
+        assert!(!rule.matches(&unassigned_comment, "forgeclaw"));
+    }
+
+    #[test]
     fn trigger_validation_rejects_names_the_normalizer_cannot_emit() {
         let unknown_event: TriggerRule =
             serde_json::from_value(json!({"on": "issue.closed"})).unwrap();
@@ -609,6 +634,23 @@ mod tests {
         assert!(message.contains("\"body_truncated\":true"));
         assert!(!message.contains("unneeded"));
         assert!(message.len() < 6000);
+    }
+
+    #[test]
+    fn issue_assignment_prompt_requests_implementation() {
+        let thread = ThreadKey {
+            repo: "o/r".parse().unwrap(),
+            subject: Subject::Issue(7),
+        };
+        let assignment = ForgeEvent {
+            repo: thread.repo.clone(),
+            kind: "issue.assigned".into(),
+            subject: thread.subject,
+            payload: json!({"title": "Add export", "body": "@forgeclaw"}),
+        };
+        let message = trigger_message(&thread, "forgeclaw", &[assignment]);
+        assert!(message.contains("Implement its described work"));
+        assert!(message.contains("assignment itself is the request"));
     }
 
     #[test]

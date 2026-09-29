@@ -26,6 +26,9 @@ Comment creation and edits both use the `comment.created` trigger rules. Adding
 `@forgeclaw` in an edit can start a turn; editing a comment that still mentions
 the bot can start another. Deleted comments are ignored.
 
+Assigning an issue to ForgeClaw asks it to implement the issue and open a PR.
+Further comments on assigned work start a turn without an `@forgeclaw` mention.
+
 Any chat can open an issue or pull request and create a branch in the bot fork.
 Updating an existing branch requires an authorized turn for its matching
 bot-owned pull request.
