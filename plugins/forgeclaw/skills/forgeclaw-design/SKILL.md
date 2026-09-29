@@ -11,4 +11,6 @@ Investigate the repository and the request enough to make a concrete recommendat
 
 Record a substantial proposal in a Markdown document in the same repository, using its existing design-document convention or `docs/designs/<topic>.md`. Open a PR containing the proposal so reviewers and agents can discuss specific lines and see revisions. Keep that PR focused on the design document; do not implement the proposed code in it. Link the originating issue or request when one exists.
 
+Finish and commit the proposal before the first branch push. After opening the PR, check its remote diff contains the document before reporting it ready for review.
+
 On later review turns, read the current proposal and comments, answer questions inline, and revise the document for requested design changes. Explain material decisions in the PR discussion. Keep working through review feedback within the design scope. Merging the design PR records the accepted plan; implementation belongs in a separate code PR when requested.
