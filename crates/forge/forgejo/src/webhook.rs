@@ -28,9 +28,16 @@ pub fn webhook_events(signature: &str, secret: &str, body: &[u8]) -> Result<Vec<
     {
         let author = user(comment, "/user");
         let body = string(comment, "/body");
+        let item = hook.get("pull_request").or_else(|| hook.get("issue"));
         let mut extra = json!({
+            "source": "comment",
+            "comment_id": comment.get("id"),
             "url": comment.get("html_url"),
             "assignees": assignees(&hook),
+            "subject_title": item.map(|item| string(item, "/title")),
+            "subject_body": item.map(|item| string(item, "/body")),
+            "head_owner": hook.get("pull_request").map(head_owner),
+            "head_branch": hook.get("pull_request").map(head_branch),
         });
         if matches!(subject, Subject::Pr(_))
             && (comment.get("pull_request_review_id").is_some()
@@ -39,6 +46,8 @@ pub fn webhook_events(signature: &str, secret: &str, body: &[u8]) -> Result<Vec<
             && let Some(id) = number(comment, "/id")
         {
             extra["reply_to"] = id.into();
+            extra["path"] = comment.get("path").cloned().unwrap_or(Value::Null);
+            extra["line"] = comment.get("line").cloned().unwrap_or(Value::Null);
         }
         events.push(comment_created(&repo, subject, &author, &body, extra));
     }
@@ -59,6 +68,8 @@ pub fn webhook_events(signature: &str, secret: &str, body: &[u8]) -> Result<Vec<
                 "author": user(item, "/user"),
                 "title": string(item, "/title"),
                 "body": string(item, "/body"),
+                "head_owner": hook.get("pull_request").map(head_owner),
+                "head_branch": hook.get("pull_request").map(head_branch),
             }),
         ));
     }
@@ -76,6 +87,9 @@ pub fn webhook_events(signature: &str, secret: &str, body: &[u8]) -> Result<Vec<
                 "reviewer": reviewer,
                 "author": user(pr, "/user"),
                 "title": string(pr, "/title"),
+                "body": string(pr, "/body"),
+                "head_owner": head_owner(pr),
+                "head_branch": head_branch(pr),
             }),
         ));
     }
@@ -92,7 +106,16 @@ pub fn webhook_events(signature: &str, secret: &str, body: &[u8]) -> Result<Vec<
                 &repo,
                 "pull_request.changes_requested",
                 Subject::Pr(pr_number),
-                json!({"reviewer": reviewer, "body": body}),
+                json!({
+                    "reviewer": reviewer,
+                    "body": body,
+                    "review_id": review.get("id"),
+                    "comments_count": review.get("comments_count"),
+                    "subject_title": string(pr, "/title"),
+                    "subject_body": string(pr, "/body"),
+                    "head_owner": head_owner(pr),
+                    "head_branch": head_branch(pr),
+                }),
             ));
         } else if review_type == "pull_request_review_comment" {
             events.push(event(
@@ -103,6 +126,12 @@ pub fn webhook_events(signature: &str, secret: &str, body: &[u8]) -> Result<Vec<
                     "reviewer": reviewer,
                     "pr_author": user(pr, "/user"),
                     "body": body,
+                    "review_id": review.get("id"),
+                    "comments_count": review.get("comments_count"),
+                    "subject_title": string(pr, "/title"),
+                    "subject_body": string(pr, "/body"),
+                    "head_owner": head_owner(pr),
+                    "head_branch": head_branch(pr),
                 }),
             ));
             events.push(comment_created(
@@ -110,7 +139,15 @@ pub fn webhook_events(signature: &str, secret: &str, body: &[u8]) -> Result<Vec<
                 Subject::Pr(pr_number),
                 &reviewer,
                 &body,
-                json!({"assignees": assignees(&hook)}),
+                json!({
+                    "assignees": assignees(&hook),
+                    "source": "review",
+                    "review_id": review.get("id"),
+                    "subject_title": string(pr, "/title"),
+                    "subject_body": string(pr, "/body"),
+                    "head_owner": head_owner(pr),
+                    "head_branch": head_branch(pr),
+                }),
             ));
         }
     }
@@ -149,6 +186,8 @@ pub fn webhook_events(signature: &str, secret: &str, body: &[u8]) -> Result<Vec<
                 "author": author,
                 "title": string(pr, "/title"),
                 "body": string(pr, "/body"),
+                "head_owner": head_owner(pr),
+                "head_branch": head_branch(pr),
             }),
         ));
     }
@@ -168,7 +207,13 @@ pub fn webhook_events(signature: &str, secret: &str, body: &[u8]) -> Result<Vec<
                 subject,
                 &author,
                 &body,
-                json!({"assignees": assignees(&hook)}),
+                json!({
+                    "source": "description",
+                    "subject_title": string(item, "/title"),
+                    "assignees": assignees(&hook),
+                    "head_owner": hook.get("pull_request").map(head_owner),
+                    "head_branch": hook.get("pull_request").map(head_branch),
+                }),
             ));
         }
     }
@@ -245,6 +290,14 @@ fn user(value: &Value, pointer: &str) -> String {
         .into()
 }
 
+fn head_owner(pr: &Value) -> String {
+    user(pr, "/head/repo/owner")
+}
+
+fn head_branch(pr: &Value) -> String {
+    string(pr, "/head/ref")
+}
+
 fn string(value: &Value, pointer: &str) -> String {
     value
         .pointer(pointer)
@@ -307,12 +360,15 @@ mod tests {
             "action": "created",
             "repository": {"full_name": "o/r"},
             "sender": {"login": "alice"},
-            "issue": {"number": 7, "assignees": [{"login": "bot"}]},
+            "issue": {"number": 7, "title": "Build question", "body": "background", "assignees": [{"login": "bot"}]},
             "comment": {"id": 42, "body": "hi @bot", "user": {"login": "alice"}}
         }));
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "comment.created");
         assert_eq!(events[0].payload["mentions"], json!(["bot"]));
+        assert_eq!(events[0].payload["comment_id"], 42);
+        assert_eq!(events[0].payload["subject_title"], "Build question");
+        assert_eq!(events[0].payload["subject_body"], "background");
     }
 
     #[test]
@@ -395,8 +451,12 @@ mod tests {
             "action": "reviewed",
             "repository": {"full_name": "o/r"},
             "sender": {"login": "reviewer"},
-            "pull_request": {"number": 8, "user": {"login": "alice"}},
+            "pull_request": {
+                "number": 8, "user": {"login": "alice"},
+                "head": {"ref": "fix-review", "repo": {"owner": {"login": "bot"}}}
+            },
             "review": {
+                "id": 13,
                 "type": "pull_request_review_rejected",
                 "content": "please fix this"
             }
@@ -405,6 +465,9 @@ mod tests {
         assert_eq!(events[0].kind, "pull_request.changes_requested");
         assert_eq!(events[0].payload["reviewer"], "reviewer");
         assert_eq!(events[0].payload["body"], "please fix this");
+        assert_eq!(events[0].payload["review_id"], 13);
+        assert_eq!(events[0].payload["head_owner"], "bot");
+        assert_eq!(events[0].payload["head_branch"], "fix-review");
     }
 
     #[test]

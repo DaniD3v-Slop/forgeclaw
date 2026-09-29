@@ -41,8 +41,8 @@ const tools = [
   {
     name: "forge_read_review",
     label: "Read pull request review",
-    description: "Read one review and up to five inline comments with short diff hunks and file references. Use the review id from forge_read and pass next_offset for more comments.",
-    parameters: object({ subject, review_id: { type: "integer", minimum: 1 }, offset: { type: "integer", minimum: 0 } }, ["subject", "review_id"]),
+    description: "Read one review and up to five inline comments with short diff hunks and file references. Pass review_id when known; otherwise pass reviewer from the event to read that person's latest review. Check the returned body against the event when selecting by reviewer. Pass next_offset for more comments.",
+    parameters: object({ subject, review_id: { type: "integer", minimum: 1 }, reviewer: string, offset: { type: "integer", minimum: 0 } }, ["subject"]),
   },
   {
     name: "forge_read_body",

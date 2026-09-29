@@ -16,6 +16,12 @@ pub trait Forge: Send + Sync {
     async fn context(&self, thread: &ThreadKey) -> Result<Value>;
     async fn review_page(&self, thread: &ThreadKey, review_id: u64, offset: usize)
     -> Result<Value>;
+    async fn review_page_by_reviewer(
+        &self,
+        thread: &ThreadKey,
+        reviewer: &str,
+        offset: usize,
+    ) -> Result<Value>;
     async fn body_page(&self, thread: &ThreadKey, offset: usize) -> Result<DiffPage>;
     async fn comment_page(
         &self,

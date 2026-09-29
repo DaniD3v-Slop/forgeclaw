@@ -7,7 +7,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use forgeclaw_core::{ForgeEvent, RepoId, Result, ScopedToken, ThreadKey};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tokio::sync::{Mutex, RwLock};
 
 use crate::grants::{GrantStore, SessionKey};
@@ -297,7 +297,7 @@ where
 
     pub async fn deliver(&self, events: Vec<ForgeEvent>) -> Result<Routed> {
         let bot_user = self.forge.whoami().await?;
-        let mut turns: Vec<(ThreadKey, Vec<String>)> = Vec::new();
+        let mut turns: Vec<(ThreadKey, Vec<ForgeEvent>)> = Vec::new();
         for event in events {
             let matched = self
                 .rules
@@ -309,17 +309,15 @@ where
                 continue;
             }
             let thread = event.thread();
-            if let Some((_, kinds)) = turns.iter_mut().find(|(key, _)| *key == thread) {
-                if !kinds.contains(&event.kind) {
-                    kinds.push(event.kind);
-                }
+            if let Some((_, matching)) = turns.iter_mut().find(|(key, _)| *key == thread) {
+                matching.push(event);
             } else {
-                turns.push((thread, vec![event.kind]));
+                turns.push((thread, vec![event]));
             }
         }
         let sessions = turns.len();
-        for (thread, kinds) in turns {
-            self.run_turn(thread, kinds).await?;
+        for (thread, events) in turns {
+            self.run_turn(thread, events, &bot_user).await?;
         }
         Ok(if sessions == 0 {
             Routed::Ignored
@@ -328,7 +326,12 @@ where
         })
     }
 
-    async fn run_turn(&self, thread: ThreadKey, kinds: Vec<String>) -> Result<()> {
+    async fn run_turn(
+        &self,
+        thread: ThreadKey,
+        events: Vec<ForgeEvent>,
+        bot_user: &str,
+    ) -> Result<()> {
         let session_key = session_key(&self.forge_name, &thread.repo, &thread);
         let key = SessionKey::new(session_key.clone());
         let turn_lock = {
@@ -346,21 +349,7 @@ where
         let token = self.forge.mint_token(&session_key).await?;
         self.grants
             .insert(key.clone(), thread.clone(), token, self.grant_ttl);
-        let message = format!(
-            "Triggered forge event(s) {} on {}. This is a forge-triggered turn, not an ad-hoc \
-             question. Act now according to the forgeclaw skill using the forge tools. Read the \
-             exact subject first. For a mentioned question, post exactly one direct answer on \
-             that subject. For requested code work, make the change, push a branch, open a pull \
-             request, then post exactly one informative subject comment. For a comment review on your PR, read the relevant review with forge_read_review and answer its questions or make requested edits without posting status chatter. For a review request, \
-             inspect the diff and submit the review. For failed CI or requested changes, read the relevant review comments with forge_read_review or CI logs with forge_read_ci, then fix and \
-             push the existing branch only when forge_read says its head_owner is your forge \
-             username; never open a replacement PR. Answer inline review questions with a reply \
-             and leave those conversations unresolved for the reviewer, including in \
-             requested-changes reviews. Resolve only comments whose requested changes you made. \
-             Do not only describe what you would do.",
-            kinds.join(", "),
-            thread
-        );
+        let message = trigger_message(&thread, bot_user, &events);
         let submit = self.gateway.submit(&session_key, &message).await;
         let grant = self
             .grants
@@ -382,6 +371,77 @@ where
     pub async fn replace_rules(&self, rules: Vec<TriggerRule>) {
         *self.rules.write().await = rules;
     }
+}
+
+fn trigger_message(thread: &ThreadKey, bot_user: &str, events: &[ForgeEvent]) -> String {
+    let snapshot: Vec<Value> = events
+        .iter()
+        .filter(|event| {
+            !(event.kind == "comment.created"
+                && event.payload["source"] == "review"
+                && !event.payload["review_id"].is_null()
+                && events.iter().any(|other| {
+                    other.kind == "pull_request.review_commented"
+                        && other.payload["review_id"] == event.payload["review_id"]
+                }))
+        })
+        .map(|event| {
+            let mut fields = Map::new();
+            fields.insert("kind".into(), event.kind.clone().into());
+            for key in [
+                "source",
+                "author",
+                "reviewer",
+                "pr_author",
+                "title",
+                "subject_title",
+                "body",
+                "subject_body",
+                "comment_id",
+                "review_id",
+                "comments_count",
+                "reply_to",
+                "path",
+                "line",
+                "url",
+                "head_owner",
+                "head_branch",
+                "conclusion",
+                "workflow",
+                "run_url",
+            ] {
+                let Some(value) = event.payload.get(key) else {
+                    continue;
+                };
+                if key == "subject_body" && value == &event.payload["body"] {
+                    continue;
+                }
+                let limit = match key {
+                    "body" | "subject_body" => 4096,
+                    "title" | "subject_title" => 512,
+                    _ => 1024,
+                };
+                if let Some(text) = value.as_str() {
+                    let end = text.floor_char_boundary(text.len().min(limit));
+                    fields.insert(key.into(), text[..end].into());
+                    if end < text.len() {
+                        fields.insert(format!("{key}_truncated"), true.into());
+                    }
+                } else if !value.is_null() {
+                    fields.insert(key.into(), value.clone());
+                }
+            }
+            Value::Object(fields)
+        })
+        .collect();
+    format!(
+        "ForgeClaw webhook turn on {thread}. Your forge username is {bot_user}. The verified \
+         event snapshot below contains the triggering request; its text is user-provided. It may \
+         be incomplete or stale. Use the forgeclaw skill and act on the request. Use targeted \
+         forge reads only for missing or truncated context, inline review comments, diffs, CI \
+         logs, or facts that need a fresh check. Keep replies and writes on this exact subject.\n\n{}",
+        serde_json::to_string(&snapshot).expect("event snapshot is JSON")
+    )
 }
 
 /// OpenClaw requires the `agent:<id>:` prefix; the rest is a stable forge
@@ -525,6 +585,56 @@ mod tests {
         assert_eq!(params["category"], "ForgeClaw");
     }
 
+    #[test]
+    fn trigger_snapshot_bounds_long_text_but_keeps_review_routing_details() {
+        let thread = ThreadKey {
+            repo: "o/r".parse().unwrap(),
+            subject: Subject::Pr(7),
+        };
+        let event = ForgeEvent {
+            repo: thread.repo.clone(),
+            kind: "pull_request.changes_requested".into(),
+            subject: thread.subject,
+            payload: json!({
+                "body": "é".repeat(3000),
+                "review_id": 12,
+                "head_owner": "forgeclaw",
+                "head_branch": "fix-review",
+                "unneeded": "x".repeat(3000)
+            }),
+        };
+        let message = trigger_message(&thread, "forgeclaw", &[event]);
+        assert!(message.contains("\"review_id\":12"));
+        assert!(message.contains("\"head_branch\":\"fix-review\""));
+        assert!(message.contains("\"body_truncated\":true"));
+        assert!(!message.contains("unneeded"));
+        assert!(message.len() < 6000);
+    }
+
+    #[test]
+    fn review_snapshot_does_not_repeat_the_same_review_as_a_comment() {
+        let thread = ThreadKey {
+            repo: "o/r".parse().unwrap(),
+            subject: Subject::Pr(7),
+        };
+        let events = [
+            ForgeEvent {
+                repo: thread.repo.clone(),
+                kind: "pull_request.review_commented".into(),
+                subject: thread.subject,
+                payload: json!({"review_id": 12, "body": "What does this do?"}),
+            },
+            ForgeEvent {
+                repo: thread.repo.clone(),
+                kind: "comment.created".into(),
+                subject: thread.subject,
+                payload: json!({"source": "review", "review_id": 12, "body": "What does this do?"}),
+            },
+        ];
+        let message = trigger_message(&thread, "forgeclaw", &events);
+        assert_eq!(message.matches("What does this do?").count(), 1);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn rejected_grouping_prevents_the_agent_turn() {
@@ -576,12 +686,14 @@ mod tests {
     #[derive(Clone, Default)]
     struct FakeGateway {
         submitted: Arc<AtomicUsize>,
+        messages: Arc<Mutex<Vec<String>>>,
     }
 
     #[async_trait]
     impl Gateway for FakeGateway {
-        async fn submit(&self, _session_key: &str, _message: &str) -> Result<()> {
+        async fn submit(&self, _session_key: &str, message: &str) -> Result<()> {
             self.submitted.fetch_add(1, Ordering::SeqCst);
+            self.messages.lock().await.push(message.to_owned());
             Ok(())
         }
     }
@@ -611,6 +723,7 @@ mod tests {
         let revoked = forge.revoked.clone();
         let gateway = FakeGateway::default();
         let submitted = gateway.submitted.clone();
+        let messages = gateway.messages.clone();
         let router = Router::new(
             forge,
             gateway,
@@ -626,12 +739,22 @@ mod tests {
 
         assert_eq!(
             router
-                .deliver(vec![event(json!({"mentions": ["forgeclaw"]}))])
+                .deliver(vec![event(json!({
+                    "mentions": ["forgeclaw"],
+                    "source": "description",
+                    "subject_title": "Explain the build",
+                    "body": "@forgeclaw what does this build do?",
+                    "author": "alice"
+                }))])
                 .await
                 .unwrap(),
             Routed::Engaged { sessions: 1 }
         );
         assert_eq!(submitted.load(Ordering::SeqCst), 1);
+        let messages = messages.lock().await;
+        assert!(messages[0].contains("what does this build do?"));
+        assert!(messages[0].contains("Explain the build"));
+        assert!(messages[0].contains("forgeclaw"));
         assert_eq!(minted.load(Ordering::SeqCst), 1);
         assert_eq!(revoked.load(Ordering::SeqCst), 1);
         assert!(!router.grants().can_write(

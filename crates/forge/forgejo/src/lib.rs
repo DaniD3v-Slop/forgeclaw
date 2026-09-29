@@ -204,6 +204,30 @@ impl Forgejo {
             "next_offset": (offset + REVIEW_COMMENTS_PAGE < comments.len()).then_some(offset + REVIEW_COMMENTS_PAGE),
         }))
     }
+
+    pub async fn review_page_by_reviewer(
+        &self,
+        thread: &ThreadKey,
+        reviewer: &str,
+        offset: usize,
+    ) -> Result<Value> {
+        let Subject::Pr(number) = thread.subject else {
+            return Err(Error::Forge(
+                "review requires a pull request subject".into(),
+            ));
+        };
+        let (owner, name) = own(&thread.repo);
+        let (_, reviews) = go(self.api.repo_list_pull_reviews(owner, name, number as i64)).await?;
+        let review_id = reviews
+            .iter()
+            .rev()
+            .find(|review| login(&review.user).eq_ignore_ascii_case(reviewer))
+            .and_then(|review| review.id)
+            .ok_or_else(|| Error::Forge(format!("no review by {reviewer} on {thread}")))?;
+        let review_id =
+            u64::try_from(review_id).map_err(|_| Error::Forge("review id is invalid".into()))?;
+        self.review_page(thread, review_id, offset).await
+    }
 }
 
 impl Forgejo {
@@ -582,6 +606,15 @@ impl Forge for Forgejo {
         offset: usize,
     ) -> Result<Value> {
         Forgejo::review_page(self, thread, review_id, offset).await
+    }
+
+    async fn review_page_by_reviewer(
+        &self,
+        thread: &ThreadKey,
+        reviewer: &str,
+        offset: usize,
+    ) -> Result<Value> {
+        Forgejo::review_page_by_reviewer(self, thread, reviewer, offset).await
     }
 
     async fn body_page(&self, thread: &ThreadKey, offset: usize) -> Result<DiffPage> {

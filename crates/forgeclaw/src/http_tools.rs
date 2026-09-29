@@ -137,15 +137,17 @@ async fn tool_call(
         }
         "forge_read_review" => {
             let thread = subject(arguments)?;
-            let review_id = arguments
-                .get("review_id")
-                .and_then(Value::as_u64)
-                .ok_or("missing integer field: review_id")?;
             let offset = offset(arguments)?;
-            let page = server
-                .forge
-                .review_page(&thread, review_id, offset)
-                .await
+            let page =
+                if let Some(review_id) = arguments.get("review_id").and_then(Value::as_u64) {
+                    server.forge.review_page(&thread, review_id, offset).await
+                } else {
+                    let reviewer = string(arguments, "reviewer")?;
+                    server
+                        .forge
+                        .review_page_by_reviewer(&thread, reviewer, offset)
+                        .await
+                }
                 .map_err(|error| error.to_string())?;
             serde_json::to_string(&page).map_err(|error| error.to_string())?
         }

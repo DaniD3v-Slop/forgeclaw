@@ -322,6 +322,12 @@ async fn pull_request_context_exposes_head_ownership() {
         review["comments"][0]["diff_hunk"],
         "@@ -10,2 +10,3 @@\n context\n+new line"
     );
+    let by_reviewer = client(&server)
+        .review_page_by_reviewer(&thread(Subject::Pr(7)), "bob", 0)
+        .await
+        .unwrap();
+    assert_eq!(by_reviewer["id"], 11);
+    assert_eq!(by_reviewer["comments"][0]["id"], 42);
 
     let first = client(&server)
         .diff_page(&thread(Subject::Pr(7)), 0)
