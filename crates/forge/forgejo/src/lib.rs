@@ -511,6 +511,51 @@ impl Forgejo {
         )))
     }
 
+    pub async fn add_reaction(
+        &self,
+        thread: &ThreadKey,
+        comment_id: Option<u64>,
+        emoji: &str,
+    ) -> Result<()> {
+        let (owner, name) = own(&thread.repo);
+        let options = args(json!({"content": emoji}));
+        if let Some(id) = comment_id {
+            go(self
+                .api
+                .issue_post_comment_reaction(owner, name, id as i64, options))
+            .await?;
+        } else {
+            let (Subject::Issue(number) | Subject::Pr(number)) = thread.subject;
+            go(self
+                .api
+                .issue_post_issue_reaction(owner, name, number as i64, options))
+            .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn remove_reaction(
+        &self,
+        thread: &ThreadKey,
+        comment_id: Option<u64>,
+        emoji: &str,
+    ) -> Result<()> {
+        let (owner, name) = own(&thread.repo);
+        let options = args(json!({"content": emoji}));
+        if let Some(id) = comment_id {
+            go(self
+                .api
+                .issue_delete_comment_reaction(owner, name, id as i64, options))
+            .await
+        } else {
+            let (Subject::Issue(number) | Subject::Pr(number)) = thread.subject;
+            go(self
+                .api
+                .issue_delete_issue_reaction(owner, name, number as i64, options))
+            .await
+        }
+    }
+
     pub async fn submit_review(&self, repo: &RepoId, pr: u64, review: Review) -> Result<()> {
         let (owner, name) = own(repo);
         let event = match review.verdict {
@@ -671,6 +716,24 @@ impl Forge for Forgejo {
 
     async fn comment(&self, thread: &ThreadKey, body: &str, reply_to: Option<u64>) -> Result<u64> {
         Forgejo::comment(self, thread, body, reply_to).await
+    }
+
+    async fn add_reaction(
+        &self,
+        thread: &ThreadKey,
+        comment_id: Option<u64>,
+        emoji: &str,
+    ) -> Result<()> {
+        Forgejo::add_reaction(self, thread, comment_id, emoji).await
+    }
+
+    async fn remove_reaction(
+        &self,
+        thread: &ThreadKey,
+        comment_id: Option<u64>,
+        emoji: &str,
+    ) -> Result<()> {
+        Forgejo::remove_reaction(self, thread, comment_id, emoji).await
     }
 
     async fn resolve_review_comment(&self, thread: &ThreadKey, comment_id: u64) -> Result<()> {

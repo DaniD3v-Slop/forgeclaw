@@ -9,6 +9,7 @@ services:
       FORGEJO__service__DISABLE_REGISTRATION: "true"
       FORGEJO__server__ROOT_URL: http://localhost:${FORGEJO_PORT:-3001}/
       FORGEJO__webhook__ALLOWED_HOST_LIST: "*"
+      FORGEJO__ui__REACTIONS: "+1,-1,laugh,confused,heart,hooray,rocket,eyes,🧑‍🍳,🍳"
     ports:
       - "127.0.0.1:${FORGEJO_PORT:-3001}:3000"
       - "127.0.0.1:${FORGEJO_SSH_PORT:-2222}:2222"

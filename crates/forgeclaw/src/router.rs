@@ -149,7 +149,24 @@ pub trait WebhookForge: Send + Sync {
     async fn whoami(&self) -> Result<String>;
     async fn mint_token(&self, label: &str) -> Result<ScopedToken>;
     async fn revoke_token(&self, token: &ScopedToken) -> Result<()>;
+    async fn add_reaction(
+        &self,
+        token: &ScopedToken,
+        thread: &ThreadKey,
+        comment_id: Option<u64>,
+        emoji: &str,
+    ) -> Result<()>;
+    async fn remove_reaction(
+        &self,
+        token: &ScopedToken,
+        thread: &ThreadKey,
+        comment_id: Option<u64>,
+        emoji: &str,
+    ) -> Result<()>;
 }
+
+const RUNNING_REACTION: &str = "🧑‍🍳";
+const COMPLETED_REACTION: &str = "🍳";
 
 /// Starts an OpenClaw turn. Its implementation is intentionally the only
 /// place that knows how the gateway is reached.
@@ -348,9 +365,35 @@ where
         let _turn = turn_lock.lock().await;
         let token = self.forge.mint_token(&session_key).await?;
         self.grants
-            .insert(key.clone(), thread.clone(), token, self.grant_ttl);
+            .insert(key.clone(), thread.clone(), token.clone(), self.grant_ttl);
+        let comment_id = reaction_comment_id(&events);
+        if let Err(error) = self
+            .forge
+            .add_reaction(&token, &thread, comment_id, RUNNING_REACTION)
+            .await
+        {
+            eprintln!("could not mark {thread} as running: {error}");
+        }
         let message = trigger_message(&thread, bot_user, &events);
         let submit = self.gateway.submit(&session_key, &message).await;
+        if submit.is_ok() {
+            match self
+                .forge
+                .add_reaction(&token, &thread, comment_id, COMPLETED_REACTION)
+                .await
+            {
+                Ok(()) => {
+                    if let Err(error) = self
+                        .forge
+                        .remove_reaction(&token, &thread, comment_id, RUNNING_REACTION)
+                        .await
+                    {
+                        eprintln!("could not clear running reaction on {thread}: {error}");
+                    }
+                }
+                Err(error) => eprintln!("could not mark {thread} as completed: {error}"),
+            }
+        }
         let grant = self
             .grants
             .take(&key)
@@ -371,6 +414,14 @@ where
     pub async fn replace_rules(&self, rules: Vec<TriggerRule>) {
         *self.rules.write().await = rules;
     }
+}
+
+fn reaction_comment_id(events: &[ForgeEvent]) -> Option<u64> {
+    events.iter().find_map(|event| {
+        (event.kind == "comment.created" && event.payload["source"] == "comment")
+            .then(|| event.payload["comment_id"].as_u64())
+            .flatten()
+    })
 }
 
 fn trigger_message(thread: &ThreadKey, bot_user: &str, events: &[ForgeEvent]) -> String {
@@ -699,10 +750,13 @@ mod tests {
         assert!(error.to_string().contains("sessions.patch"));
     }
 
+    type ReactionLog = Arc<Mutex<Vec<(String, Option<u64>, String)>>>;
+
     #[derive(Clone, Default)]
     struct FakeForge {
         minted: Arc<AtomicUsize>,
         revoked: Arc<AtomicUsize>,
+        reactions: ReactionLog,
     }
 
     #[async_trait]
@@ -721,6 +775,34 @@ mod tests {
 
         async fn revoke_token(&self, _token: &ScopedToken) -> Result<()> {
             self.revoked.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn add_reaction(
+            &self,
+            _token: &ScopedToken,
+            thread: &ThreadKey,
+            comment_id: Option<u64>,
+            emoji: &str,
+        ) -> Result<()> {
+            self.reactions
+                .lock()
+                .await
+                .push((thread.to_string(), comment_id, format!("+{emoji}")));
+            Ok(())
+        }
+
+        async fn remove_reaction(
+            &self,
+            _token: &ScopedToken,
+            thread: &ThreadKey,
+            comment_id: Option<u64>,
+            emoji: &str,
+        ) -> Result<()> {
+            self.reactions
+                .lock()
+                .await
+                .push((thread.to_string(), comment_id, format!("-{emoji}")));
             Ok(())
         }
     }
@@ -745,6 +827,15 @@ mod tests {
         thread: ThreadKey,
     }
 
+    struct FailingGateway;
+
+    #[async_trait]
+    impl Gateway for FailingGateway {
+        async fn submit(&self, _session_key: &str, _message: &str) -> Result<()> {
+            Err(forgeclaw_core::Error::Forge("agent unavailable".into()))
+        }
+    }
+
     #[async_trait]
     impl Gateway for ExpiringGateway {
         async fn submit(&self, session_key: &str, _message: &str) -> Result<()> {
@@ -763,6 +854,7 @@ mod tests {
         let forge = FakeForge::default();
         let minted = forge.minted.clone();
         let revoked = forge.revoked.clone();
+        let reactions = forge.reactions.clone();
         let gateway = FakeGateway::default();
         let submitted = gateway.submitted.clone();
         let messages = gateway.messages.clone();
@@ -799,10 +891,58 @@ mod tests {
         assert!(messages[0].contains("forgeclaw"));
         assert_eq!(minted.load(Ordering::SeqCst), 1);
         assert_eq!(revoked.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *reactions.lock().await,
+            vec![
+                ("octo/repo#issue/7".into(), None, "+🧑‍🍳".into()),
+                ("octo/repo#issue/7".into(), None, "+🍳".into()),
+                ("octo/repo#issue/7".into(), None, "-🧑‍🍳".into()),
+            ]
+        );
         assert!(!router.grants().can_write(
             &SessionKey::new("agent:main:forgejo/octo/repo#issue/7"),
             &event(json!({})).thread(),
         ));
+    }
+
+    #[test]
+    fn discussion_comments_receive_reactions_on_the_comment() {
+        assert_eq!(
+            reaction_comment_id(&[event(json!({"source": "comment", "comment_id": 42}))]),
+            Some(42)
+        );
+        assert_eq!(
+            reaction_comment_id(&[event(json!({"source": "description", "comment_id": 42}))]),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_turn_keeps_running_reaction_for_retry() {
+        let forge = FakeForge::default();
+        let reactions = forge.reactions.clone();
+        let router = Router::new(
+            forge,
+            FailingGateway,
+            "forgejo",
+            vec![TriggerRule {
+                on: "comment.created".into(),
+                enabled: true,
+                filter: TriggerFilter::Any,
+            }],
+            Arc::new(GrantStore::default()),
+            Duration::from_secs(60),
+        );
+        assert!(
+            router
+                .deliver(vec![event(json!({"source": "comment", "comment_id": 42}))])
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            *reactions.lock().await,
+            vec![("octo/repo#issue/7".into(), Some(42), "+🧑‍🍳".into())]
+        );
     }
 
     #[tokio::test]

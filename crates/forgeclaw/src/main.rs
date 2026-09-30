@@ -15,7 +15,7 @@ use forgeclaw::grants::GrantStore;
 use forgeclaw::http_tools::ToolServer;
 use forgeclaw::outbox::Outbox;
 use forgeclaw::router::{OpenClawCli, Router as ForgeRouter, TriggerRule, WebhookForge};
-use forgeclaw_core::{Forge, Result, ScopedToken};
+use forgeclaw_core::{Forge, Result, ScopedToken, ThreadKey};
 use forgeclaw_forgejo::{Forgejo, webhook_events};
 use serde::Deserialize;
 use serde_json::Value;
@@ -100,6 +100,32 @@ impl WebhookForge for ForgejoWebhook {
 
     async fn revoke_token(&self, token: &ScopedToken) -> Result<()> {
         self.forge.revoke_token(token).await
+    }
+
+    async fn add_reaction(
+        &self,
+        token: &ScopedToken,
+        thread: &ThreadKey,
+        comment_id: Option<u64>,
+        emoji: &str,
+    ) -> Result<()> {
+        self.forge
+            .with_token(&token.secret)?
+            .add_reaction(thread, comment_id, emoji)
+            .await
+    }
+
+    async fn remove_reaction(
+        &self,
+        token: &ScopedToken,
+        thread: &ThreadKey,
+        comment_id: Option<u64>,
+        emoji: &str,
+    ) -> Result<()> {
+        self.forge
+            .with_token(&token.secret)?
+            .remove_reaction(thread, comment_id, emoji)
+            .await
     }
 }
 

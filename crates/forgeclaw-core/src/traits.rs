@@ -37,6 +37,18 @@ pub trait Forge: Send + Sync {
     async fn create_pr(&self, repo: &RepoId, pr: NewPr) -> Result<u64>;
     async fn edit_pr(&self, repo: &RepoId, number: u64, update: PrUpdate) -> Result<()>;
     async fn comment(&self, thread: &ThreadKey, body: &str, reply_to: Option<u64>) -> Result<u64>;
+    async fn add_reaction(
+        &self,
+        thread: &ThreadKey,
+        comment_id: Option<u64>,
+        emoji: &str,
+    ) -> Result<()>;
+    async fn remove_reaction(
+        &self,
+        thread: &ThreadKey,
+        comment_id: Option<u64>,
+        emoji: &str,
+    ) -> Result<()>;
     async fn resolve_review_comment(&self, thread: &ThreadKey, comment_id: u64) -> Result<()>;
     async fn submit_review(&self, repo: &RepoId, pr: u64, review: Review) -> Result<()>;
 

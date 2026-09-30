@@ -198,6 +198,39 @@ async fn edits_pull_request_state_without_changing_other_fields() {
 }
 
 #[tokio::test]
+async fn reactions_target_the_issue_or_its_discussion_comment() {
+    let server = MockServer::start().await;
+    for (route, emoji) in [
+        ("/api/v1/repos/o/r/issues/7/reactions", "🧑‍🍳"),
+        ("/api/v1/repos/o/r/issues/comments/42/reactions", "🍳"),
+    ] {
+        Mock::given(method("POST"))
+            .and(path(route))
+            .and(body_partial_json(json!({"content": emoji})))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"content": emoji})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path(route))
+            .and(body_partial_json(json!({"content": emoji})))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    let forge = client(&server);
+    let target = thread(Subject::Issue(7));
+    forge.add_reaction(&target, None, "🧑‍🍳").await.unwrap();
+    forge.remove_reaction(&target, None, "🧑‍🍳").await.unwrap();
+    forge.add_reaction(&target, Some(42), "🍳").await.unwrap();
+    forge
+        .remove_reaction(&target, Some(42), "🍳")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn creates_issue_in_selected_repository() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
