@@ -13,12 +13,12 @@ Forgejo webhook
   -> Forgejo API
 ```
 
-Webhook delivery is one-shot and best-effort. After verifying and translating
-the signed payload, the HTTP handler queues matching work in this daemon and
-returns `202 Accepted`; it does not wait for OpenClaw. A daemon crash can lose
-queued work, and a Forgejo redelivery can start the same work again. ForgeClaw
-keeps no durable task, retry, reconciliation, or idempotency state. OpenClaw
-owns session queueing and execution after the background submission succeeds.
+After verifying and translating the signed payload, the HTTP handler persists
+the delivery in a SQLite outbox before returning `202 Accepted`. The daemon
+retries failed deliveries after a restart. A successful subject turn is marked
+complete before the next subject in the same delivery runs, so a later failure
+does not repeat it. A crash between a successful turn and that mark can still
+repeat the turn; delivery is at least once.
 
 The stable session key is:
 
@@ -31,6 +31,8 @@ the triggering subject. The Forgejo credential remains inside the daemon. The
 JavaScript plugin forwards the trusted OpenClaw session key in an authenticated
 request; session identity is never a model-controlled tool argument. Ad-hoc
 sessions may read but cannot write.
+
+Temporary Forgejo tokens left by a crashed daemon are revoked on startup.
 
 ## Supported webhook triggers
 
@@ -48,12 +50,24 @@ supported.
 ## Tools
 
 - `forge_read`
+- `forge_read_review`
+- `forge_read_body`
+- `forge_read_comment`
+- `forge_read_ci`
+- `forge_read_diff`
 - `forge_search_issues`
 - `forge_comment`
+- `forge_resolve_review_comment`
+- `forge_create_issue`
 - `forge_create_pr`
+- `forge_edit_pr`
 - `forge_submit_review`
 - `forge_checkout`
 - `forge_push`
+
+The trigger editor can preview draft rules against a sample event without
+starting an agent turn. Its outbox status shows pending deliveries and the last
+failure; operators can retry pending deliveries after fixing the cause.
 
 All forge behavior and authorization remain in Rust. The OpenClaw plugin only
 registers these tools, forwards calls, and serves the trigger editor.

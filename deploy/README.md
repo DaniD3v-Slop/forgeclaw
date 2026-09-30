@@ -30,6 +30,10 @@ automatically, including after a daemon restart. If storage is unavailable,
 ForgeClaw responds with `503` so Forgejo can redeliver. Processing is at least
 once: a crash after an OpenClaw turn succeeds but before its completion is
 recorded can repeat that turn.
+If one delivery contains several subjects, completed subjects are skipped on
+retry. The trigger editor shows pending count, oldest pending receipt, and last
+failure, and can retry pending deliveries after the cause is fixed. ForgeClaw
+revokes temporary turn tokens left by an earlier crashed process on startup.
 
 The OpenClaw configuration and ForgeClaw plugin path are seeded automatically
 on the first start. ForgeClaw does not add a permanent Control UI navigation

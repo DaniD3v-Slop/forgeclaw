@@ -4,6 +4,9 @@ import { readFileSync } from "node:fs";
 
 const UI_ROOT = "/plugins/forgeclaw";
 const UI_WRITE_PATH = "/api/forgeclaw/config";
+const UI_PREVIEW_PATH = "/api/forgeclaw/preview";
+const UI_OUTBOX_STATUS_PATH = "/api/forgeclaw/outbox/status";
+const UI_OUTBOX_RETRY_PATH = "/api/forgeclaw/outbox/retry";
 const AUTHORIZATION_CACHE = Symbol.for("forgeclaw.authorization-cache");
 const UI_CSRF = randomBytes(24).toString("hex");
 const UI_PAGE = readFileSync(new URL("./ui.html", import.meta.url), "utf8").replaceAll(
@@ -276,7 +279,7 @@ function validateTriggers(value) {
   });
 }
 
-function createUiHandler(api) {
+function createUiHandler(api, config, authorization) {
   return async (req, res) => {
     const url = new URL(req.url ?? "/", "http://gateway.invalid");
     const path = url.pathname.replace(/\/$/, "");
@@ -326,6 +329,45 @@ function createUiHandler(api) {
       }
       return;
     }
+    const daemonPath = {
+      [UI_PREVIEW_PATH]: "/triggers/preview",
+      [UI_OUTBOX_STATUS_PATH]: "/outbox/status",
+      [UI_OUTBOX_RETRY_PATH]: "/outbox/retry",
+    }[path];
+    if (req.method === "POST" && daemonPath) {
+      try {
+        const body = JSON.parse(await readBody(req));
+        if (body?.csrf !== UI_CSRF) {
+          json(res, 403, { error: "invalid ForgeClaw page token" }, fromPluginFrame);
+          return;
+        }
+        if (!authorization) {
+          json(res, 503, { error: `${config.authorization_env} is not set in the OpenClaw gateway` }, fromPluginFrame);
+          return;
+        }
+        const preview = path === UI_PREVIEW_PATH;
+        const requestBody = preview
+          ? JSON.stringify({ triggers: validateTriggers(body.triggers), event: body.event })
+          : undefined;
+        try {
+          const response = await fetch(`${config.daemon_url.replace(/\/$/, "")}${daemonPath}`, {
+            method: path === UI_OUTBOX_STATUS_PATH ? "GET" : "POST",
+            headers: {
+              Authorization: authorization,
+              ...(preview ? { "Content-Type": "application/json" } : {}),
+            },
+            ...(requestBody === undefined ? {} : { body: requestBody }),
+          });
+          const payload = await response.json();
+          json(res, response.status, payload, fromPluginFrame);
+        } catch (error) {
+          json(res, 502, { error: `ForgeClaw daemon is unavailable: ${error instanceof Error ? error.message : String(error)}` }, fromPluginFrame);
+        }
+      } catch (error) {
+        json(res, 400, { error: error instanceof Error ? error.message : String(error) }, fromPluginFrame);
+      }
+      return;
+    }
     json(res, 404, { error: "not found" });
   };
 }
@@ -343,14 +385,22 @@ export default definePluginEntry({
       path: `${UI_ROOT}/`,
       auth: "gateway",
       match: "prefix",
-      handler: createUiHandler(api),
+      handler: createUiHandler(api, config, authorization),
     });
     api.registerHttpRoute({
       path: UI_WRITE_PATH,
       auth: "plugin",
       match: "exact",
-      handler: createUiHandler(api),
+      handler: createUiHandler(api, config, authorization),
     });
+    for (const path of [UI_PREVIEW_PATH, UI_OUTBOX_STATUS_PATH, UI_OUTBOX_RETRY_PATH]) {
+      api.registerHttpRoute({
+        path,
+        auth: "plugin",
+        match: "exact",
+        handler: createUiHandler(api, config, authorization),
+      });
+    }
     for (const definition of tools) {
       api.registerTool((context) => createTool(definition, context, config, authorization), {
         name: definition.name,

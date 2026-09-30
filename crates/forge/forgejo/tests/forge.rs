@@ -1,7 +1,7 @@
 use forgeclaw_core::{Forge, NewPr, PrState, PrUpdate, RepoId, Subject, ThreadKey};
 use forgeclaw_forgejo::Forgejo;
 use serde_json::{Value, json};
-use wiremock::matchers::{body_partial_json, method, path};
+use wiremock::matchers::{body_partial_json, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn client(server: &MockServer) -> Forgejo {
@@ -67,6 +67,56 @@ async fn task_tokens_are_minted_and_revoked_with_basic_auth() {
     let token = forge.mint_token("one-turn").await.unwrap();
     assert_eq!(token.id, 4);
     forge.revoke_token(&token).await.unwrap();
+}
+
+#[tokio::test]
+async fn startup_revokes_only_temporary_tokens_across_pages() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/user"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"login": "bot"})))
+        .mount(&server)
+        .await;
+    let first_page: Vec<_> = (1..=100)
+        .map(|id| json!({"id": id, "name": if id == 1 { "forgeclaw-smoke-disposable".to_owned() } else { format!("personal-{id}") }}))
+        .collect();
+    Mock::given(method("GET"))
+        .and(path("/api/v1/users/bot/tokens"))
+        .and(query_param("page", "1"))
+        .and(query_param("limit", "100"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("X-Total-Count", "102")
+                .set_body_json(first_page),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/users/bot/tokens"))
+        .and(query_param("page", "2"))
+        .and(query_param("limit", "100"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("X-Total-Count", "102")
+                .set_body_json(json!([
+                    {"id": 101, "name": "forgeclaw-temp-11111111-2222-3333-4444-555555555555"},
+                    {"id": 102, "name": "forgeclaw-11111111-2222-3333-4444-555555555555"}
+                ])),
+        )
+        .mount(&server)
+        .await;
+    for id in [101, 102] {
+        Mock::given(method("DELETE"))
+            .and(path(format!("/api/v1/users/bot/tokens/{id}")))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    assert_eq!(
+        token_client(&server).revoke_stale_tokens().await.unwrap(),
+        2
+    );
 }
 
 async fn mock(server: &MockServer, verb: &str, route: &str, status: u16, body: Value) {

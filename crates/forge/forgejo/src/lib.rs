@@ -23,6 +23,36 @@ const DIFF_PAGE_MAX: usize = 16 * 1024;
 const BODY_PAGE_MAX: usize = 8 * 1024;
 const REVIEW_COMMENTS_PAGE: usize = 5;
 const TOKEN_SCOPES: &[&str] = &["write:repository", "write:issue", "read:user"];
+const TEMP_TOKEN_PREFIX: &str = "forgeclaw-temp-";
+const TOKEN_PAGE_SIZE: u32 = 100;
+
+fn temporary_token_name(name: &str) -> bool {
+    let suffix = if let Some(suffix) = name.strip_prefix(TEMP_TOKEN_PREFIX) {
+        [
+            "create-pr-",
+            "edit-pr-",
+            "create-issue-",
+            "checkout-",
+            "push-",
+        ]
+        .iter()
+        .find_map(|action| suffix.strip_prefix(action))
+        .unwrap_or(suffix)
+    } else if let Some(suffix) = name.strip_prefix("forgeclaw-") {
+        suffix
+    } else {
+        return false;
+    };
+    suffix.len() == 36
+        && suffix.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+}
+
 pub struct Forgejo {
     api: forgejo_api::Forgejo,
     http: reqwest::Client,
@@ -64,6 +94,57 @@ impl Forgejo {
             self.url.clone(),
         )
         .map_err(err)
+    }
+
+    /// Revoke temporary ForgeClaw tokens left by a previous daemon process.
+    /// Call before this process begins accepting turns.
+    pub async fn revoke_stale_tokens(&self) -> Result<usize> {
+        let username = self.me().await?;
+        let api = self.token_api().await?;
+        let mut ids = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut page = 1_u32;
+        loop {
+            let (headers, tokens) = go(api
+                .user_get_tokens(&username)
+                .page(page)
+                .page_size(TOKEN_PAGE_SIZE))
+            .await?;
+            let count = tokens.len();
+            for token in tokens {
+                let id = token
+                    .id
+                    .ok_or_else(|| Error::Forge("listed token has no id".into()))?;
+                if !seen.insert(id) {
+                    return Err(Error::Forge("token list repeated an earlier page".into()));
+                }
+                if token.name.as_deref().is_some_and(temporary_token_name) {
+                    ids.push(id);
+                }
+            }
+            if headers
+                .x_total_count
+                .is_some_and(|total| seen.len() >= total.max(0) as usize)
+            {
+                break;
+            }
+            if count < TOKEN_PAGE_SIZE as usize {
+                if headers
+                    .x_total_count
+                    .is_some_and(|total| seen.len() < total.max(0) as usize)
+                {
+                    return Err(Error::Forge("token list ended before total count".into()));
+                }
+                break;
+            }
+            page = page
+                .checked_add(1)
+                .ok_or_else(|| Error::Forge("too many token pages".into()))?;
+        }
+        for id in &ids {
+            go(api.user_delete_access_token(&username, &id.to_string())).await?;
+        }
+        Ok(ids.len())
     }
 
     async fn me(&self) -> Result<String> {
@@ -895,4 +976,21 @@ fn hunk_lines(hunk: &str) -> (Option<u64>, Option<u64>) {
             .and_then(|value| value.parse::<u64>().ok())
     };
     (parse('-', fields.next()), parse('+', fields.next()))
+}
+
+#[cfg(test)]
+mod token_name_tests {
+    use super::temporary_token_name;
+
+    #[test]
+    fn matches_only_issued_token_names() {
+        let id = "11111111-2222-3333-4444-555555555555";
+        assert!(temporary_token_name(&format!("forgeclaw-{id}")));
+        assert!(temporary_token_name(&format!("forgeclaw-temp-{id}")));
+        assert!(temporary_token_name(&format!(
+            "forgeclaw-temp-create-pr-{id}"
+        )));
+        assert!(!temporary_token_name("forgeclaw-smoke-disposable"));
+        assert!(!temporary_token_name("forgeclaw-temp-someone-elses-token"));
+    }
 }

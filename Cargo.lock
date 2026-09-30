@@ -410,6 +410,7 @@ dependencies = [
  "axum",
  "forgeclaw-core",
  "forgeclaw-forgejo",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
@@ -417,6 +418,7 @@ dependencies = [
  "tokio",
  "url",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]

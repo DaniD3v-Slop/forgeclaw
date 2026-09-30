@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -14,14 +13,8 @@ use url::Url;
 
 use crate::grants::{GrantStore, SessionKey};
 
-static TOKEN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
 fn temporary_token_label(action: &str) -> String {
-    format!(
-        "chat-{action}-{}-{}",
-        std::process::id(),
-        TOKEN_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    )
+    format!("forgeclaw-temp-{action}-{}", uuid::Uuid::new_v4())
 }
 
 /// State for the authenticated HTTP bridge used by the OpenClaw plugin tools.

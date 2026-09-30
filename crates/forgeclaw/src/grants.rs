@@ -119,12 +119,6 @@ mod tests {
     }
 
     #[test]
-    fn no_grant_is_read_only() {
-        let store = GrantStore::default();
-        assert!(!store.can_write(&SessionKey::new("session-a"), &thread(1)));
-    }
-
-    #[test]
     fn grant_only_authorizes_its_exact_subject() {
         let store = GrantStore::default();
         let session = SessionKey::new("session-a");

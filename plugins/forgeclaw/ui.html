@@ -44,13 +44,26 @@
     .clause { border-left:2px solid #3b424e; padding:2px 0 2px 13px; margin-top:12px; }
     .clause-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; color:var(--muted); font-size:12px; }
     .condition { display:grid; grid-template-columns:minmax(145px,1fr) 112px minmax(150px,1.4fr) auto; gap:8px; margin-top:8px; }
-    select,input[type=text] { width:100%; min-width:0; color:var(--text); background:#11141a; border:1px solid var(--line); border-radius:9px; padding:8px 9px; outline:0; }
+    select,input[type=text],input[type=number] { width:100%; min-width:0; color:var(--text); background:#11141a; border:1px solid var(--line); border-radius:9px; padding:8px 9px; outline:0; }
     select:focus,input:focus { border-color:var(--accent); box-shadow:0 0 0 2px rgba(255,107,53,.14); }
     .or { display:flex; align-items:center; gap:10px; margin:13px 0 2px; color:var(--muted); font-size:11px; font-weight:700; }
     .or:before,.or:after { content:""; height:1px; background:var(--line); flex:1; }
     .footer-actions { display:flex; gap:8px; margin-top:13px; }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); padding:17px; margin-top:22px; }
+    .panel h2 { margin:0 0 6px; font-size:18px; }
+    .panel p { color:var(--muted); margin:0 0 14px; font-size:14px; line-height:1.5; }
+    .sample-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin-bottom:12px; }
+    .sample-grid label,.sample-field { color:var(--muted); font-size:12px; }
+    .sample-grid input,.sample-grid select,.sample-field input { margin-top:5px; }
+    .sample-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; margin-bottom:14px; }
+    .panel-result { margin:12px 0 0; min-height:20px; font-size:14px; }
+    .panel-result.error { color:#ff8b8b; }
+    .matched { border-color:var(--ok); }
+    .panel-actions { display:flex; gap:8px; align-items:center; }
+    .panel-actions .hint { margin:0; }
+    @media (max-width:680px) { .sample-grid,.sample-fields { grid-template-columns:1fr; } }
     @media (max-width:680px) { main{padding:14px} header{display:block}.actions{margin-top:16px}.trigger-head{grid-template-columns:auto 1fr auto}.condition{grid-template-columns:1fr 100px}.condition .value{grid-column:1 / 3}.condition .remove-condition{grid-column:3;grid-row:1 / 3} }
-    @media (prefers-color-scheme:light) { :root { color-scheme:light; --bg:#f5f5f3; --panel:#fff; --panel2:#f1f1ee; --text:#242526; --muted:#686e76; --line:#dcddd9; } .event-select,select,input[type=text]{color:var(--text)} select,input[type=text]{background:#fafaf8}.event-select option,select option{background:white} }
+    @media (prefers-color-scheme:light) { :root { color-scheme:light; --bg:#f5f5f3; --panel:#fff; --panel2:#f1f1ee; --text:#242526; --muted:#686e76; --line:#dcddd9; } .event-select,select,input[type=text],input[type=number]{color:var(--text)} select,input[type=text],input[type=number]{background:#fafaf8}.event-select option,select option{background:white} }
   </style>
 </head>
 <body>
@@ -62,6 +75,26 @@
   <div id="status" role="status"></div>
   <section id="triggers"></section>
   <div id="empty" hidden>No triggers yet. Add one to start a workflow.</div>
+  <section class="panel" aria-labelledby="preview-title">
+    <h2 id="preview-title">Preview a forge event</h2>
+    <p>See which rules would match a sample event. Previewing does not save changes or start work.</p>
+    <div class="sample-grid">
+      <label>Repository owner<input id="sample-owner" type="text" value="example"></label>
+      <label>Repository name<input id="sample-repo" type="text" value="repo"></label>
+      <label>Issue or pull request<select id="sample-subject"><option value="Issue">Issue</option><option value="Pr">Pull request</option></select></label>
+      <label>Number<input id="sample-number" type="number" min="1" step="1" value="1"></label>
+      <label>Event<select id="sample-kind"></select></label>
+    </div>
+    <div id="sample-fields" class="sample-fields"></div>
+    <button id="preview" type="button">Preview matches</button>
+    <div id="preview-result" class="panel-result" role="status"></div>
+  </section>
+  <section class="panel" aria-labelledby="outbox-title">
+    <h2 id="outbox-title">Webhook deliveries</h2>
+    <p>Check pending work and retry delivery after fixing an error.</p>
+    <div class="panel-actions"><button id="outbox-refresh" type="button">Refresh status</button><button id="outbox-retry" type="button">Retry now</button></div>
+    <div id="outbox-result" class="panel-result" role="status"></div>
+  </section>
 </main>
 <datalist id="identity-values"><option value="@me"><option value="!@me"></datalist>
 <script>
@@ -102,6 +135,60 @@ function render(){
       <div class="footer-actions">${groups.length===0?'<button class="small ghost add-condition-empty">Add condition</button>':'<button class="small ghost add-group">Add alternative (OR)</button>'}</div></div></article>`;
   }).join("");
 }
+function showPreview(text,error=false){const result=$("#preview-result");result.textContent=text;result.classList.toggle("error",error);}
+function clearPreview(){showPreview("");document.querySelectorAll(".trigger.matched").forEach(card=>card.classList.remove("matched"));}
+function showOutbox(text,error=false){const result=$("#outbox-result");result.textContent=text;result.classList.toggle("error",error);}
+async function postAction(path,body={}){
+  const response=await request(path,{method:"POST",headers:{"Content-Type":"text/plain"},body:JSON.stringify({csrf:CSRF,...body})});
+  const result=await response.json();
+  if(!response.ok)throw new Error(result.error||`HTTP ${response.status}`);
+  return result;
+}
+function renderSampleFields(){
+  const event=EVENTS[$("#sample-kind").value];
+  $("#sample-fields").innerHTML=Object.entries(event.fields).map(([name,label])=>`<label class="sample-field">${esc(label)}<input type="text" data-field="${esc(name)}" placeholder="${name==="assignees"||name==="mentions"?"name1, name2":"Value"}"></label>`).join("");
+}
+$("#sample-kind").innerHTML=options(Object.fromEntries(Object.entries(EVENTS).map(([name,event])=>[name,event.title])),"comment.created");
+$("#sample-kind").addEventListener("change",()=>{renderSampleFields();clearPreview();});
+$("#triggers").addEventListener("input",clearPreview);
+$("#triggers").addEventListener("change",clearPreview);
+$("#triggers").addEventListener("click",clearPreview);
+document.querySelector(".sample-grid").addEventListener("input",clearPreview);
+document.querySelector(".sample-grid").addEventListener("change",clearPreview);
+$("#sample-fields").addEventListener("input",clearPreview);
+$("#preview").addEventListener("click",async()=>{
+  sync();
+  const number=Number($("#sample-number").value);
+  const owner=$("#sample-owner").value.trim();
+  const name=$("#sample-repo").value.trim();
+  if(!owner||!name||!Number.isSafeInteger(number)||number<1){showPreview("Enter a repository and a positive issue or pull request number.",true);return;}
+  const payload={};
+  $("#sample-fields").querySelectorAll("input").forEach(input=>{
+    const value=input.value.trim();
+    if(value)payload[input.dataset.field]=["assignees","mentions"].includes(input.dataset.field)?value.split(",").map(item=>item.trim()).filter(Boolean):value;
+  });
+  showPreview("Checking…");
+  try{
+    const result=await postAction("/api/forgeclaw/preview",{triggers,event:{repo:{owner,name},subject:{[$("#sample-subject").value]:number},kind:$("#sample-kind").value,payload}});
+    document.querySelectorAll(".trigger").forEach((card,index)=>card.classList.toggle("matched",result.matches.includes(index)));
+    showPreview(result.matches.length?`Matching rules: ${result.matches.map(index=>index+1).join(", ")}.`:`No rules match this event.`);
+  }catch(error){showPreview(`Could not preview: ${error.message}`,true);}
+});
+async function refreshOutbox(prefix=""){
+  showOutbox("Loading…");
+  try{
+    const status=await postAction("/api/forgeclaw/outbox/status");
+    const age=status.oldest_pending_ms==null?"":` Oldest pending: ${Math.max(0,Math.round((Date.now()-status.oldest_pending_ms)/1000))} seconds ago.`;
+    const error=status.last_error?` Last error: ${status.last_error}`:"";
+    showOutbox(`${prefix}${status.pending} pending.${age}${error}`);
+  }catch(error){showOutbox(`Could not load delivery status: ${error.message}`,true);}
+}
+$("#outbox-refresh").addEventListener("click",()=>refreshOutbox());
+$("#outbox-retry").addEventListener("click",async()=>{
+  showOutbox("Retrying…");
+  try{const result=await postAction("/api/forgeclaw/outbox/retry");await refreshOutbox(`Retry requested for ${result.retried} deliveries. `);}
+  catch(error){showOutbox(`Could not retry deliveries: ${error.message}`,true);}
+});
 function condition(event,field,pattern,ci){const negative=pattern.startsWith("!");const value=negative?pattern.slice(1):pattern;return `<div class="condition" data-condition="${ci}"><select class="field">${options(event.fields,field)}</select><select class="operator"><option value="is" ${negative?"":"selected"}>is</option><option value="not" ${negative?"selected":""}>is not</option></select><input class="value" type="text" value="${esc(value)}" placeholder="Value or @me" list="identity-values"><button class="small ghost danger remove-condition" aria-label="Remove condition">Remove</button></div>`;}
 function sync(){document.querySelectorAll(".trigger").forEach(card=>{const ti=+card.dataset.trigger;const trigger=triggers[ti];trigger.on=$(".event-select",card).value;trigger.enabled=$(".enabled",card).checked;const groups=[];card.querySelectorAll(".clause").forEach(group=>{const clause={};group.querySelectorAll(".condition").forEach(row=>{const field=$(".field",row).value;const value=$(".value",row).value.trim();if(field&&value)clause[field]=($(".operator",row).value==="not"?"!":"")+value;});groups.push(clause);});if(groups.length===0)delete trigger.filter;else trigger.filter=groups.length===1?groups[0]:groups; if(trigger.enabled)delete trigger.enabled;});}
 function setStatus(text,kind=""){const el=$("#status");el.textContent=text;el.className=kind;}
@@ -110,6 +197,8 @@ $("#triggers").addEventListener("click",e=>{const card=e.target.closest(".trigge
 $("#add").addEventListener("click",()=>{sync();triggers.push({on:"comment.created",filter:{...defaults["comment.created"]}});render();});
 $("#save").addEventListener("click",async()=>{sync();setStatus("Saving…");try{const response=await request("/api/forgeclaw/config",{method:"POST",headers:{"Content-Type":"text/plain"},body:JSON.stringify({csrf:CSRF,triggers})});const body=await response.json();if(!response.ok)throw new Error(body.error||`HTTP ${response.status}`);triggers=body.triggers;render();setStatus("Saved. New forge events use these triggers immediately.","ok");}catch(error){setStatus(`Could not save: ${error.message}`,"error");}});
 render();
+renderSampleFields();
+refreshOutbox();
 </script>
 </body>
 </html>

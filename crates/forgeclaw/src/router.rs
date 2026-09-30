@@ -313,6 +313,14 @@ where
     }
 
     pub async fn deliver(&self, events: Vec<ForgeEvent>) -> Result<Routed> {
+        self.deliver_with(events, |_| Ok(())).await
+    }
+
+    pub async fn deliver_with(
+        &self,
+        events: Vec<ForgeEvent>,
+        mut completed: impl FnMut(&ThreadKey) -> Result<()>,
+    ) -> Result<Routed> {
         let bot_user = self.forge.whoami().await?;
         let mut turns: Vec<(ThreadKey, Vec<ForgeEvent>)> = Vec::new();
         for event in events {
@@ -334,13 +342,24 @@ where
         }
         let sessions = turns.len();
         for (thread, events) in turns {
-            self.run_turn(thread, events, &bot_user).await?;
+            self.run_turn(thread.clone(), events, &bot_user).await?;
+            completed(&thread)?;
         }
         Ok(if sessions == 0 {
             Routed::Ignored
         } else {
             Routed::Engaged { sessions }
         })
+    }
+
+    pub async fn preview(&self, rules: &[TriggerRule], event: &ForgeEvent) -> Result<Vec<usize>> {
+        TriggerRule::validate_all(rules)?;
+        let bot_user = self.forge.whoami().await?;
+        Ok(rules
+            .iter()
+            .enumerate()
+            .filter_map(|(index, rule)| rule.matches(event, &bot_user).then_some(index))
+            .collect())
     }
 
     async fn run_turn(
@@ -367,7 +386,7 @@ where
         // session. Forgejo requires token names to be unique per user.
         let token = self
             .forge
-            .mint_token(&format!("forgeclaw-{}", uuid::Uuid::new_v4()))
+            .mint_token(&format!("forgeclaw-temp-turn-{}", uuid::Uuid::new_v4()))
             .await?;
         self.grants
             .insert(key.clone(), thread.clone(), token.clone(), self.grant_ttl);
@@ -925,6 +944,37 @@ mod tests {
             &SessionKey::new("agent:main:forgejo/octo/repo#issue/7"),
             &event(json!({})).thread(),
         ));
+    }
+
+    #[tokio::test]
+    async fn delivery_stops_after_progress_recording_fails() {
+        let gateway = FakeGateway::default();
+        let submitted = gateway.submitted.clone();
+        let router = Router::new(
+            FakeForge::default(),
+            gateway,
+            "forgejo",
+            vec![TriggerRule {
+                on: "comment.created".into(),
+                enabled: true,
+                filter: TriggerFilter::Any,
+            }],
+            Arc::new(GrantStore::default()),
+            Duration::from_secs(60),
+        );
+        let first = event(json!({"body": "first"}));
+        let mut second = event(json!({"body": "second"}));
+        second.subject = Subject::Issue(8);
+        let mut recorded = Vec::new();
+        let result = router
+            .deliver_with(vec![first, second], |thread| {
+                recorded.push(thread.to_string());
+                Err(forgeclaw_core::Error::Forge("outbox unavailable".into()))
+            })
+            .await;
+        assert!(result.is_err());
+        assert_eq!(recorded, ["octo/repo#issue/7"]);
+        assert_eq!(submitted.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
