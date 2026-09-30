@@ -13,7 +13,6 @@
           "listen": "0.0.0.0:3080",
           "daemon_url": "http://forgeclaw:3080",
           "workspace": "/workspace",
-          "grant_ttl_secs": 900,
           "authorization_env": "FORGECLAW_MCP_AUTHORIZATION",
           "forge": {
             "url": "http://forgejo:3000/",

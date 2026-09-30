@@ -61,18 +61,15 @@ struct DaemonConfig {
     _daemon_url: Url,
     forge: ForgeConfig,
     workspace: PathBuf,
-    #[serde(default = "default_grant_ttl")]
-    grant_ttl_secs: u64,
+    // Accept configurations written before grants became tied to turn lifetime.
+    #[serde(rename = "grant_ttl_secs")]
+    _legacy_grant_ttl_secs: Option<u64>,
     #[serde(default)]
     trigger: Vec<TriggerRule>,
     /// Environment variable containing the bearer value accepted by the
     /// plugin-tool bridge.
     /// The secret itself is never written to OpenClaw config.
     authorization_env: String,
-}
-
-fn default_grant_ttl() -> u64 {
-    900
 }
 
 #[derive(Deserialize)]
@@ -349,7 +346,6 @@ async fn main() -> Result<()> {
         "forgejo",
         daemon.trigger,
         grants.clone(),
-        Duration::from_secs(daemon.grant_ttl_secs),
     ));
     let outbox_path = env::var("FORGECLAW_OUTBOX_PATH")
         .unwrap_or_else(|_| "/home/node/.openclaw/forgeclaw-outbox.sqlite".into());
@@ -415,7 +411,6 @@ mod tests {
             "forgejo",
             vec![],
             Arc::new(GrantStore::default()),
-            Duration::from_secs(30),
         ));
         WebhookState {
             router,
@@ -606,6 +601,7 @@ mod tests {
                     "listen": "127.0.0.1:3080",
                     "daemon_url": "http://forgeclaw:3080",
                     "workspace": "/tmp/workspace",
+                    "grant_ttl_secs": 900,
                     "authorization_env": "AUTHORIZATION",
                     "forge": {
                         "url": "http://forgejo:3000/",

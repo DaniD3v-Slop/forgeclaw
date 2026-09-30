@@ -34,7 +34,7 @@
       "listen": { "type": "string" },
       "daemon_url": { "type": "string", "format": "uri" },
       "workspace": { "type": "string" },
-      "grant_ttl_secs": { "type": "integer", "minimum": 1 },
+      "grant_ttl_secs": { "type": "integer", "minimum": 1, "description": "Legacy setting; active grants now last for the turn." },
       "authorization_env": { "type": "string" },
       "forge": {
         "type": "object",
@@ -86,7 +86,6 @@
     "daemon_url": { "label": "Daemon URL", "advanced": true },
     "authorization_env": { "label": "Daemon authorization environment variable", "advanced": true },
     "workspace": { "label": "Shared agent workspace", "advanced": true },
-    "grant_ttl_secs": { "label": "Grant lifetime", "advanced": true },
     "trigger": { "label": "Triggers (use the ForgeClaw page)", "advanced": true },
     "forge": { "label": "Forgejo connection", "advanced": true }
   }

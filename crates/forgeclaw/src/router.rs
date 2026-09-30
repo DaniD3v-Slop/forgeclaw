@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Weak};
-use std::time::Duration;
 
 use async_trait::async_trait;
 use forgeclaw_core::{ForgeEvent, RepoId, Result, ScopedToken, ThreadKey};
@@ -283,7 +282,6 @@ pub struct Router<F, G> {
     forge_name: String,
     rules: RwLock<Vec<TriggerRule>>,
     grants: Arc<GrantStore>,
-    grant_ttl: Duration,
     turn_locks: Mutex<HashMap<SessionKey, Weak<Mutex<()>>>>,
 }
 
@@ -298,7 +296,6 @@ where
         forge_name: impl Into<String>,
         rules: Vec<TriggerRule>,
         grants: Arc<GrantStore>,
-        grant_ttl: Duration,
     ) -> Self {
         Self {
             forge,
@@ -306,7 +303,6 @@ where
             forge_name: forge_name.into(),
             rules: RwLock::new(rules),
             grants,
-            grant_ttl,
             turn_locks: Mutex::new(HashMap::new()),
         }
     }
@@ -387,8 +383,9 @@ where
             .forge
             .mint_token(&format!("forgeclaw-temp-turn-{}", uuid::Uuid::new_v4()))
             .await?;
-        self.grants
-            .insert(key.clone(), thread.clone(), token.clone(), self.grant_ttl);
+        let grant_lease = self
+            .grants
+            .insert(key.clone(), thread.clone(), token.clone());
         let comment_id = reaction_comment_id(&events);
         if let Err(error) = self
             .forge
@@ -399,6 +396,7 @@ where
         }
         let message = trigger_message(&thread, bot_user, &events);
         let submit = self.gateway.submit(&session_key, &message).await;
+        drop(grant_lease);
         if submit.is_ok() {
             if let Err(error) = self
                 .forge
@@ -408,11 +406,7 @@ where
                 eprintln!("could not clear running reaction on {thread}: {error}");
             }
         }
-        let grant = self
-            .grants
-            .take(&key)
-            .expect("router inserted the active grant for this session");
-        let revoke = self.forge.revoke_token(grant.token()).await;
+        let revoke = self.forge.revoke_token(&token).await;
         submit?;
         // A failed cleanup must not replay a turn that OpenClaw already ran.
         if let Err(error) = revoke {
@@ -853,9 +847,11 @@ mod tests {
         }
     }
 
-    struct ExpiringGateway {
+    struct WaitingGateway {
         grants: Arc<GrantStore>,
         thread: ThreadKey,
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
     }
 
     struct FailingGateway;
@@ -868,13 +864,18 @@ mod tests {
     }
 
     #[async_trait]
-    impl Gateway for ExpiringGateway {
+    impl Gateway for WaitingGateway {
         async fn submit(&self, session_key: &str, _message: &str) -> Result<()> {
             assert!(
-                !self
-                    .grants
+                self.grants
                     .can_write(&SessionKey::new(session_key), &self.thread),
-                "the zero-TTL grant must not authorize the turn"
+                "the active turn must have its write grant"
+            );
+            self.started.notify_one();
+            self.release.notified().await;
+            assert!(
+                self.grants
+                    .can_write(&SessionKey::new(session_key), &self.thread)
             );
             Ok(())
         }
@@ -899,7 +900,6 @@ mod tests {
                 filter: TriggerFilter::One(BTreeMap::from([("mentions".into(), "@me".into())])),
             }],
             Arc::new(GrantStore::default()),
-            Duration::from_secs(60),
         );
 
         assert_eq!(
@@ -949,7 +949,6 @@ mod tests {
                 filter: TriggerFilter::Any,
             }],
             Arc::new(GrantStore::default()),
-            Duration::from_secs(60),
         );
         let first = event(json!({"body": "first"}));
         let mut second = event(json!({"body": "second"}));
@@ -982,7 +981,6 @@ mod tests {
                 filter: TriggerFilter::Any,
             }],
             Arc::new(GrantStore::default()),
-            Duration::from_secs(60),
         );
 
         for _ in 0..2 {
@@ -1022,7 +1020,6 @@ mod tests {
                 filter: TriggerFilter::Any,
             }],
             Arc::new(GrantStore::default()),
-            Duration::from_secs(60),
         );
         assert!(
             router
@@ -1037,14 +1034,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_expired_grant_is_removed_without_panicking() {
+    async fn grant_stays_active_until_the_turn_finishes() {
         let grants = Arc::new(GrantStore::default());
         let current = event(json!({"mentions": ["forgeclaw"]}));
-        let router = Router::new(
+        let session = SessionKey::new(session_key("forgejo", &current.repo, &current.thread()));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let router = Arc::new(Router::new(
             FakeForge::default(),
-            ExpiringGateway {
+            WaitingGateway {
                 grants: grants.clone(),
                 thread: current.thread(),
+                started: started.clone(),
+                release: release.clone(),
             },
             "forgejo",
             vec![TriggerRule {
@@ -1052,14 +1054,50 @@ mod tests {
                 enabled: true,
                 filter: TriggerFilter::One(BTreeMap::from([("mentions".into(), "@me".into())])),
             }],
-            grants,
-            Duration::ZERO,
-        );
+            grants.clone(),
+        ));
 
+        let task = tokio::spawn(async move { router.deliver(vec![current]).await });
+        started.notified().await;
+        assert!(grants.can_write(&session, &event(json!({})).thread()));
+        release.notify_one();
         assert_eq!(
-            router.deliver(vec![current]).await.unwrap(),
+            task.await.unwrap().unwrap(),
             Routed::Engaged { sessions: 1 }
         );
+        assert!(!grants.can_write(&session, &event(json!({})).thread()));
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_turn_drops_its_grant() {
+        let grants = Arc::new(GrantStore::default());
+        let current = event(json!({}));
+        let thread = current.thread();
+        let session = SessionKey::new(session_key("forgejo", &current.repo, &thread));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let router = Arc::new(Router::new(
+            FakeForge::default(),
+            WaitingGateway {
+                grants: grants.clone(),
+                thread: thread.clone(),
+                started: started.clone(),
+                release: Arc::new(tokio::sync::Notify::new()),
+            },
+            "forgejo",
+            vec![TriggerRule {
+                on: "comment.created".into(),
+                enabled: true,
+                filter: TriggerFilter::Any,
+            }],
+            grants.clone(),
+        ));
+
+        let task = tokio::spawn(async move { router.deliver(vec![current]).await });
+        started.notified().await;
+        assert!(grants.can_write(&session, &thread));
+        task.abort();
+        assert!(task.await.is_err());
+        assert!(!grants.can_write(&session, &thread));
     }
 
     #[tokio::test]
@@ -1085,7 +1123,6 @@ mod tests {
                 },
             ],
             Arc::new(GrantStore::default()),
-            Duration::from_secs(60),
         );
         let mut opened = event(json!({"author": "alice"}));
         opened.kind = "pull_request.opened".into();

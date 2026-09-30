@@ -15,6 +15,8 @@ with `read:repository`, `read:issue`, and `read:user` scopes. Register a
 webhook pointing to `http://forgeclaw:3080/webhook`. Put the bot password,
 access token, and webhook secret in the corresponding `.env` fields. The
 password is used only to mint and revoke a scoped token for each routed turn.
+Write access stays active for that turn and is removed when it ends, even if the
+turn takes longer than 15 minutes.
 Forgejo must allow the temporary 🧑‍🍳 reaction for turn status; the local
 Compose service enables it.
 Then start the base stack:

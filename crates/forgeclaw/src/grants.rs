@@ -1,6 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use forgeclaw_core::{ScopedToken, ThreadKey};
 
@@ -24,23 +23,34 @@ impl SessionKey {
 }
 
 /// A currently valid authority to mutate one forge thread.
-///
-pub struct Grant {
+struct Grant {
     thread: ThreadKey,
     token: ScopedToken,
-    expires_at: Instant,
-}
-
-impl Grant {
-    pub fn token(&self) -> &ScopedToken {
-        &self.token
-    }
 }
 
 /// In-memory authority store shared by the webhook router and tool server.
 #[derive(Default)]
 pub struct GrantStore {
-    grants: Mutex<HashMap<SessionKey, Grant>>,
+    grants: Mutex<HashMap<SessionKey, Arc<Grant>>>,
+}
+
+/// Keeps a grant active for the lifetime of one agent turn.
+pub struct GrantLease<'a> {
+    store: &'a GrantStore,
+    session: SessionKey,
+    grant: Arc<Grant>,
+}
+
+impl Drop for GrantLease<'_> {
+    fn drop(&mut self) {
+        let mut grants = self.store.lock();
+        if grants
+            .get(&self.session)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.grant))
+        {
+            grants.remove(&self.session);
+        }
+    }
 }
 
 impl GrantStore {
@@ -49,18 +59,14 @@ impl GrantStore {
         session: SessionKey,
         thread: ThreadKey,
         token: ScopedToken,
-        ttl: Duration,
-    ) {
-        let grant = Grant {
-            thread,
-            token,
-            expires_at: Instant::now() + ttl,
-        };
-        self.lock().insert(session, grant);
-    }
-
-    pub fn take(&self, session: &SessionKey) -> Option<Grant> {
-        self.lock().remove(session)
+    ) -> GrantLease<'_> {
+        let grant = Arc::new(Grant { thread, token });
+        self.lock().insert(session.clone(), grant.clone());
+        GrantLease {
+            store: self,
+            session,
+            grant,
+        }
     }
 
     pub fn can_write(&self, session: &SessionKey, thread: &ThreadKey) -> bool {
@@ -68,9 +74,6 @@ impl GrantStore {
         let Some(grant) = grants.get(session) else {
             return false;
         };
-        if grant.expires_at <= Instant::now() {
-            return false;
-        }
         same_subject(&grant.thread, thread)
     }
 
@@ -81,11 +84,10 @@ impl GrantStore {
     ) -> Option<ScopedToken> {
         let grants = self.lock();
         let grant = grants.get(session)?;
-        (grant.expires_at > Instant::now() && same_subject(&grant.thread, thread))
-            .then(|| grant.token.clone())
+        same_subject(&grant.thread, thread).then(|| grant.token.clone())
     }
 
-    fn lock(&self) -> MutexGuard<'_, HashMap<SessionKey, Grant>> {
+    fn lock(&self) -> MutexGuard<'_, HashMap<SessionKey, Arc<Grant>>> {
         self.grants.lock().expect("grant store mutex poisoned")
     }
 }
@@ -100,6 +102,7 @@ fn same_subject(a: &ThreadKey, b: &ThreadKey) -> bool {
 mod tests {
     use super::*;
     use forgeclaw_core::{RepoId, Subject};
+    use std::time::Duration;
 
     fn thread(number: u64) -> ThreadKey {
         ThreadKey {
@@ -122,7 +125,7 @@ mod tests {
     fn grant_only_authorizes_its_exact_subject() {
         let store = GrantStore::default();
         let session = SessionKey::new("session-a");
-        store.insert(session.clone(), thread(1), token(), Duration::from_secs(60));
+        let _lease = store.insert(session.clone(), thread(1), token());
 
         assert!(store.can_write(&session, &thread(1)));
         assert!(!store.can_write(&session, &thread(2)));
@@ -135,11 +138,10 @@ mod tests {
         let mut original = thread(2);
         original.repo.owner = "SrinoHosting".into();
         original.repo.name = "Infra".into();
-        store.insert(
+        let _lease = store.insert(
             SessionKey::new("agent:main:forgejo/SrinoHosting/Infra#issue/2"),
             original,
             token(),
-            Duration::from_secs(60),
         );
 
         let session = SessionKey::new("agent:main:forgejo/srinohosting/infra#issue/2");
@@ -152,21 +154,39 @@ mod tests {
     }
 
     #[test]
-    fn expired_grant_is_removed() {
+    fn grant_is_removed_when_turn_ends() {
         let store = GrantStore::default();
         let session = SessionKey::new("session-a");
-        store.insert(session.clone(), thread(1), token(), Duration::ZERO);
+        let lease = store.insert(session.clone(), thread(1), token());
 
+        assert!(store.can_write(&session, &thread(1)));
+        drop(lease);
         assert!(!store.can_write(&session, &thread(1)));
     }
 
     #[test]
-    fn completing_turn_removes_its_grant() {
+    fn older_turn_cannot_remove_a_replacement_grant() {
         let store = GrantStore::default();
         let session = SessionKey::new("session-a");
-        store.insert(session.clone(), thread(1), token(), Duration::from_secs(60));
+        let old = store.insert(session.clone(), thread(1), token());
+        let current = store.insert(session.clone(), thread(2), token());
 
-        store.take(&session);
+        drop(old);
+        assert!(store.can_write(&session, &thread(2)));
+        drop(current);
+        assert!(!store.can_write(&session, &thread(2)));
+    }
+
+    #[test]
+    #[ignore = "checks the real 15-minute boundary"]
+    fn active_grant_survives_fifteen_minutes() {
+        let store = GrantStore::default();
+        let session = SessionKey::new("long-running-turn");
+        let lease = store.insert(session.clone(), thread(1), token());
+
+        std::thread::sleep(Duration::from_secs(901));
+        assert!(store.can_write(&session, &thread(1)));
+        drop(lease);
         assert!(!store.can_write(&session, &thread(1)));
     }
 }

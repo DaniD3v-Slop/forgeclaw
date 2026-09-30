@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Duration;
 use std::{path::Path, process::Command};
 
 use forgeclaw::grants::{GrantStore, SessionKey};
@@ -137,7 +136,7 @@ async fn bridge_restricts_comments_to_the_granted_subject_and_scoped_token() {
         .mount(&forge)
         .await;
     let grants = Arc::new(GrantStore::default());
-    grants.insert(
+    let _lease = grants.insert(
         SessionKey::new("Agent:Main:Turn"),
         ThreadKey {
             repo: "o/r".parse::<RepoId>().unwrap(),
@@ -147,9 +146,8 @@ async fn bridge_restricts_comments_to_the_granted_subject_and_scoped_token() {
             id: 9,
             secret: "scoped-token".into(),
         },
-        Duration::from_secs(60),
     );
-    let (url, _workspace) = bridge(&forge, grants).await;
+    let (url, _workspace) = bridge(&forge, grants.clone()).await;
     let arguments = json!({"subject": "o/r#issue/7", "body": "Ready"});
     let (status, body) = call(&url, "forge_comment", arguments.clone(), None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -281,7 +279,7 @@ async fn bridge_submits_review_only_with_matching_grant() {
         .mount(&forge)
         .await;
     let grants = Arc::new(GrantStore::default());
-    grants.insert(
+    let _lease = grants.insert(
         SessionKey::new("review-session"),
         ThreadKey {
             repo: "o/r".parse().unwrap(),
@@ -291,9 +289,8 @@ async fn bridge_submits_review_only_with_matching_grant() {
             id: 9,
             secret: "scoped-token".into(),
         },
-        Duration::from_secs(60),
     );
-    let (url, _workspace) = bridge(&forge, grants).await;
+    let (url, _workspace) = bridge(&forge, grants.clone()).await;
     let (status, response) = call(
         &url,
         "forge_submit_review",
