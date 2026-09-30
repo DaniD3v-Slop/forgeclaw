@@ -200,9 +200,9 @@ async fn edits_pull_request_state_without_changing_other_fields() {
 #[tokio::test]
 async fn reactions_target_the_issue_or_its_discussion_comment() {
     let server = MockServer::start().await;
-    for (route, emoji) in [
-        ("/api/v1/repos/o/r/issues/7/reactions", "🧑‍🍳"),
-        ("/api/v1/repos/o/r/issues/comments/42/reactions", "🍳"),
+    for (route, emoji, delete_status) in [
+        ("/api/v1/repos/o/r/issues/7/reactions", "🧑‍🍳", 204),
+        ("/api/v1/repos/o/r/issues/comments/42/reactions", "🍳", 200),
     ] {
         Mock::given(method("POST"))
             .and(path(route))
@@ -214,7 +214,7 @@ async fn reactions_target_the_issue_or_its_discussion_comment() {
         Mock::given(method("DELETE"))
             .and(path(route))
             .and(body_partial_json(json!({"content": emoji})))
-            .respond_with(ResponseTemplate::new(204))
+            .respond_with(ResponseTemplate::new(delete_status))
             .expect(1)
             .mount(&server)
             .await;

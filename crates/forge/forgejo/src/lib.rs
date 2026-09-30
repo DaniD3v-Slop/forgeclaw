@@ -541,19 +541,27 @@ impl Forgejo {
         emoji: &str,
     ) -> Result<()> {
         let (owner, name) = own(&thread.repo);
-        let options = args(json!({"content": emoji}));
-        if let Some(id) = comment_id {
-            go(self
-                .api
-                .issue_delete_comment_reaction(owner, name, id as i64, options))
-            .await
+        let path = if let Some(id) = comment_id {
+            format!("api/v1/repos/{owner}/{name}/issues/comments/{id}/reactions")
         } else {
             let (Subject::Issue(number) | Subject::Pr(number)) = thread.subject;
-            go(self
-                .api
-                .issue_delete_issue_reaction(owner, name, number as i64, options))
+            format!("api/v1/repos/{owner}/{name}/issues/{number}/reactions")
+        };
+        let url = self.url.join(&path).map_err(err)?;
+        let response = self
+            .http
+            .delete(url)
+            .json(&json!({"content": emoji}))
+            .send()
             .await
+            .map_err(err)?;
+        if !response.status().is_success() {
+            return Err(Error::Forge(format!(
+                "could not remove reaction on {thread}: HTTP {}",
+                response.status()
+            )));
         }
+        Ok(())
     }
 
     pub async fn submit_review(&self, repo: &RepoId, pr: u64, review: Review) -> Result<()> {
