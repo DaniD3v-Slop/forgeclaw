@@ -39,7 +39,7 @@ async function waitForCompletion(before, path, sawCook = false) {
     const reactions = await api(path);
     const names = new Set((reactions ?? []).map((reaction) => reaction.content));
     if (names.has('🧑‍🍳')) sawCook = true;
-    if (names.has('🍳') && !names.has('🧑‍🍳') && await calls() > before) {
+    if (!names.has('🧑‍🍳') && !names.has('🍳') && await calls() > before) {
       if (!sawCook) throw new Error('running reaction was not observed');
       return;
     }

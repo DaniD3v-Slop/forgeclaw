@@ -166,7 +166,6 @@ pub trait WebhookForge: Send + Sync {
 }
 
 const RUNNING_REACTION: &str = "🧑‍🍳";
-const COMPLETED_REACTION: &str = "🍳";
 
 /// Starts an OpenClaw turn. Its implementation is intentionally the only
 /// place that knows how the gateway is reached.
@@ -401,21 +400,12 @@ where
         let message = trigger_message(&thread, bot_user, &events);
         let submit = self.gateway.submit(&session_key, &message).await;
         if submit.is_ok() {
-            match self
+            if let Err(error) = self
                 .forge
-                .add_reaction(&token, &thread, comment_id, COMPLETED_REACTION)
+                .remove_reaction(&token, &thread, comment_id, RUNNING_REACTION)
                 .await
             {
-                Ok(()) => {
-                    if let Err(error) = self
-                        .forge
-                        .remove_reaction(&token, &thread, comment_id, RUNNING_REACTION)
-                        .await
-                    {
-                        eprintln!("could not clear running reaction on {thread}: {error}");
-                    }
-                }
-                Err(error) => eprintln!("could not mark {thread} as completed: {error}"),
+                eprintln!("could not clear running reaction on {thread}: {error}");
             }
         }
         let grant = self
@@ -936,7 +926,6 @@ mod tests {
             *reactions.lock().await,
             vec![
                 ("octo/repo#issue/7".into(), None, "+🧑‍🍳".into()),
-                ("octo/repo#issue/7".into(), None, "+🍳".into()),
                 ("octo/repo#issue/7".into(), None, "-🧑‍🍳".into()),
             ]
         );

@@ -15,8 +15,8 @@ with `read:repository`, `read:issue`, and `read:user` scopes. Register a
 webhook pointing to `http://forgeclaw:3080/webhook`. Put the bot password,
 access token, and webhook secret in the corresponding `.env` fields. The
 password is used only to mint and revoke a scoped token for each routed turn.
-Forgejo must allow the 🧑‍🍳 and 🍳 reactions for turn status; the local Compose
-service enables both.
+Forgejo must allow the temporary 🧑‍🍳 reaction for turn status; the local
+Compose service enables it.
 Then start the base stack:
 
 ```sh
@@ -60,6 +60,6 @@ With the local stack and bot credentials above running, use `./test-mock.sh`.
 It starts a separate OpenClaw gateway and ForgeClaw daemon whose model provider
 is a local deterministic HTTP server. The check creates a disposable public
 Forgejo repository, sends a signed comment webhook, verifies the model was
-called and the comment changes from 🧑‍🍳 to 🍳, then deletes the repository.
+called and the 🧑‍🍳 reaction is cleared, then deletes the repository.
 The normal gateway's model configuration and sessions are not changed. No model
 API key is needed for this test.
