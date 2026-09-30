@@ -49,3 +49,13 @@ podman compose --profile ci up -d
 Forgejo may hold workflow runs from forked pull requests for manual approval.
 Approve those runs in the repository's Actions UI when you trust the proposed
 workflow changes.
+
+## Mock OpenClaw turn
+
+With the local stack and bot credentials above running, use `./test-mock.sh`.
+It starts a separate OpenClaw gateway and ForgeClaw daemon whose model provider
+is a local deterministic HTTP server. The check creates a disposable public
+Forgejo repository, sends a signed comment webhook, verifies the model was
+called and the comment changes from 🧑‍🍳 to 🍳, then deletes the repository.
+The normal gateway's model configuration and sessions are not changed. No model
+API key is needed for this test.

@@ -1,0 +1,76 @@
+{
+  "models": {
+    "providers": {
+      "forgeclaw-mock": {
+        "baseUrl": "http://mock-model:3000/v1",
+        "apiKey": "local-mock-only",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "agent",
+            "name": "ForgeClaw mock agent",
+            "reasoning": false,
+            "input": [
+              "text"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 32768,
+            "maxTokens": 1024
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "forgeclaw-mock/agent"
+      }
+    }
+  },
+  "plugins": {
+    "load": {
+      "paths": [
+        "/home/node/.openclaw/extensions/forgeclaw"
+      ]
+    },
+    "entries": {
+      "memory-core": {
+        "enabled": false
+      },
+      "forgeclaw": {
+        "enabled": true,
+        "config": {
+          "listen": "0.0.0.0:3080",
+          "daemon_url": "http://forgeclaw-mock:3080",
+          "workspace": "/workspace",
+          "grant_ttl_secs": 900,
+          "authorization_env": "FORGECLAW_MCP_AUTHORIZATION",
+          "forge": {
+            "url": "http://forgejo:3000/",
+            "token_env": "FORGECLAW_FORGE_TOKEN",
+            "password_env": "FORGECLAW_FORGE_PASSWORD",
+            "webhook_secret_env": "FORGECLAW_WEBHOOK_SECRET"
+          },
+          "trigger": [
+            {
+              "on": "comment.created",
+              "filter": {
+                "mentions": "@me",
+                "author": "!@me"
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "gateway": {
+    "mode": "local"
+  }
+}
