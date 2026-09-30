@@ -3,7 +3,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
 
-use crate::{IssueSummary, NewPr, RepoId, Result, Review, ThreadKey};
+use crate::{IssueSummary, NewPr, PrUpdate, RepoId, Result, Review, ThreadKey};
 
 /// Forge-neutral operations used by the daemon. Each forge lives in its own
 /// adapter crate and implements this boundary.
@@ -35,6 +35,7 @@ pub trait Forge: Send + Sync {
     async fn search_issues(&self, repo: &RepoId, query: &str) -> Result<Vec<IssueSummary>>;
     async fn create_issue(&self, repo: &RepoId, title: &str, body: &str) -> Result<u64>;
     async fn create_pr(&self, repo: &RepoId, pr: NewPr) -> Result<u64>;
+    async fn edit_pr(&self, repo: &RepoId, number: u64, update: PrUpdate) -> Result<()>;
     async fn comment(&self, thread: &ThreadKey, body: &str, reply_to: Option<u64>) -> Result<u64>;
     async fn resolve_review_comment(&self, thread: &ThreadKey, comment_id: u64) -> Result<()>;
     async fn submit_review(&self, repo: &RepoId, pr: u64, review: Review) -> Result<()>;

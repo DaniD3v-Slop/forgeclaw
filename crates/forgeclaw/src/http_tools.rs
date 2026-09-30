@@ -6,7 +6,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::{Json, Router, routing::post};
-use forgeclaw_core::{Forge, NewPr, RepoId, Review, ThreadKey, Verdict};
+use forgeclaw_core::{Forge, NewPr, PrUpdate, RepoId, Review, Subject, ThreadKey, Verdict};
 use serde_json::{Value, json};
 use tempfile::tempdir;
 use tokio::process::Command;
@@ -266,6 +266,55 @@ async fn tool_call(
             let id = result?;
             format!("opened PR #{id}")
         }
+        "forge_edit_pr" => {
+            let thread = subject(arguments)?;
+            let Subject::Pr(number) = thread.subject else {
+                return Err("editing requires a pull request subject".into());
+            };
+            let update: PrUpdate = serde_json::from_value(
+                arguments
+                    .get("updates")
+                    .cloned()
+                    .ok_or("missing updates object")?,
+            )
+            .map_err(|error| format!("invalid pull request updates: {error}"))?;
+            if update.is_empty() {
+                return Err("pull request updates must not be empty".into());
+            }
+            let context = server
+                .forge
+                .context(&thread)
+                .await
+                .map_err(|error| error.to_string())?;
+            let bot = server
+                .forge
+                .whoami()
+                .await
+                .map_err(|error| error.to_string())?;
+            require_pr_head_owner(&context, &bot)?;
+            let token = server
+                .forge
+                .mint_token(&temporary_token_label("edit-pr"))
+                .await
+                .map_err(|error| error.to_string())?;
+            let result = async {
+                server
+                    .forge
+                    .with_token(&token.secret)
+                    .map_err(|error| error.to_string())?
+                    .edit_pr(&thread.repo, number, update)
+                    .await
+                    .map_err(|error| error.to_string())
+            }
+            .await;
+            server
+                .forge
+                .revoke_token(&token)
+                .await
+                .map_err(|error| error.to_string())?;
+            result?;
+            format!("updated PR #{number}")
+        }
         "forge_create_issue" => {
             let repo = repo(arguments)?;
             let title = string(arguments, "title")?;
@@ -459,6 +508,20 @@ fn require_head_owner(context: &Value, bot: &str, branch: &str) -> Result<(), St
         return Err(
             "cannot push to this pull request: branch does not match its head branch".into(),
         );
+    }
+    Ok(())
+}
+
+fn require_pr_head_owner(context: &Value, bot: &str) -> Result<(), String> {
+    let owner = context
+        .get("head_owner")
+        .and_then(Value::as_str)
+        .filter(|owner| !owner.is_empty())
+        .ok_or("pull request context has no head owner")?;
+    if owner != bot {
+        return Err(format!(
+            "cannot edit this pull request: its head branch is owned by {owner}, not {bot}"
+        ));
     }
     Ok(())
 }
@@ -756,6 +819,20 @@ mod tests {
             .is_err()
         );
         assert!(require_head_owner(&json!({}), "bot", "fix").is_err());
+    }
+
+    #[test]
+    fn only_bot_owned_pull_requests_are_editable() {
+        assert!(require_pr_head_owner(&json!({"head_owner": "bot"}), "bot").is_ok());
+        assert!(require_pr_head_owner(&json!({"head_owner": "alice"}), "bot").is_err());
+        assert!(require_pr_head_owner(&json!({}), "bot").is_err());
+        assert!(serde_json::from_value::<PrUpdate>(json!({"state": "closed"})).is_ok());
+        assert!(serde_json::from_value::<PrUpdate>(json!({"labels": [1]})).is_err());
+        assert!(
+            serde_json::from_value::<PrUpdate>(json!({}))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

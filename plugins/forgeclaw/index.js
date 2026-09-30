@@ -106,6 +106,12 @@ const tools = [
     ),
   },
   {
+    name: "forge_edit_pr",
+    label: "Edit pull request",
+    description: "Edit the title, body, or open/closed state of a pull request owned by your forge account. Use state changes only when explicitly requested.",
+    parameters: object({ subject, updates: object({ title: string, body: string, state: { type: "string", enum: ["open", "closed"] } }, []) }, ["subject", "updates"]),
+  },
+  {
     name: "forge_submit_review",
     label: "Submit pull request review",
     description:

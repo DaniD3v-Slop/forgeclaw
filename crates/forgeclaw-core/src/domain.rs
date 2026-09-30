@@ -130,6 +130,27 @@ pub struct NewPr {
     pub branch: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrUpdate {
+    pub title: Option<String>,
+    pub body: Option<String>,
+    pub state: Option<PrState>,
+}
+
+impl PrUpdate {
+    pub fn is_empty(&self) -> bool {
+        self.title.is_none() && self.body.is_none() && self.state.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrState {
+    Open,
+    Closed,
+}
+
 #[derive(Debug, Clone)]
 pub struct Review {
     pub verdict: Verdict,

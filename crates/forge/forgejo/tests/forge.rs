@@ -1,4 +1,4 @@
-use forgeclaw_core::{Forge, NewPr, RepoId, Subject, ThreadKey};
+use forgeclaw_core::{Forge, NewPr, PrState, PrUpdate, RepoId, Subject, ThreadKey};
 use forgeclaw_forgejo::Forgejo;
 use serde_json::{Value, json};
 use wiremock::matchers::{body_partial_json, method, path};
@@ -165,6 +165,36 @@ async fn creates_pull_request_from_bot_fork() {
     assert!(body.get("assignees").is_none_or(|assignees| {
         assignees.is_null() || assignees.as_array().is_some_and(Vec::is_empty)
     }));
+}
+
+#[tokio::test]
+async fn edits_pull_request_state_without_changing_other_fields() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/api/v1/repos/o/r/pulls/8"))
+        .and(body_partial_json(json!({"state": "closed"})))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "number": 8, "state": "closed", "requested_reviewers": []
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client(&server)
+        .edit_pr(
+            &repo(),
+            8,
+            PrUpdate {
+                state: Some(PrState::Closed),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let requests = server.received_requests().await.unwrap();
+    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert!(body.get("title").is_none_or(Value::is_null));
+    assert!(body.get("body").is_none_or(Value::is_null));
 }
 
 #[tokio::test]

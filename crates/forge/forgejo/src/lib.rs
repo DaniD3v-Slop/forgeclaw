@@ -10,8 +10,8 @@ use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use forgeclaw_core::{
-    DiffPage, Error, Forge, IssueSummary, NewPr, RepoId, Result, Review, ScopedToken, Subject,
-    ThreadKey, Verdict,
+    DiffPage, Error, Forge, IssueSummary, NewPr, PrUpdate, RepoId, Result, Review, ScopedToken,
+    Subject, ThreadKey, Verdict,
 };
 use forgejo_api::structs::{ActionRun, IssueListIssuesQuery, StateType};
 use forgejo_api::{ApiErrorKind, Auth, ForgejoError};
@@ -454,6 +454,17 @@ impl Forgejo {
         )
     }
 
+    pub async fn edit_pr(&self, repo: &RepoId, number: u64, update: PrUpdate) -> Result<()> {
+        let (owner, name) = own(repo);
+        let options =
+            args(serde_json::to_value(update).map_err(|error| Error::Forge(error.to_string()))?);
+        go(self
+            .api
+            .repo_edit_pull_request(owner, name, number as i64, options))
+        .await?;
+        Ok(())
+    }
+
     pub async fn comment(
         &self,
         thread: &ThreadKey,
@@ -652,6 +663,10 @@ impl Forge for Forgejo {
 
     async fn create_pr(&self, repo: &RepoId, pr: NewPr) -> Result<u64> {
         Forgejo::create_pr(self, repo, pr).await
+    }
+
+    async fn edit_pr(&self, repo: &RepoId, number: u64, update: PrUpdate) -> Result<()> {
+        Forgejo::edit_pr(self, repo, number, update).await
     }
 
     async fn comment(&self, thread: &ThreadKey, body: &str, reply_to: Option<u64>) -> Result<u64> {

@@ -19,6 +19,7 @@
       "forge_resolve_review_comment",
       "forge_create_issue",
       "forge_create_pr",
+      "forge_edit_pr",
       "forge_submit_review",
       "forge_checkout",
       "forge_push"
