@@ -60,11 +60,14 @@
           "trigger": [
             {
               "on": "comment.created",
-              "filter": {
-                "mentions": "@me",
-                "author": "!@me"
-              }
-            }
+              "filter": [
+                { "mentions": "@me", "author": "!@me" },
+                { "assignees": "@me", "author": "!@me" },
+                { "head_owner": "@me", "author": "!@me" }
+              ]
+            },
+            { "on": "issue.assigned", "filter": { "assignees": "@me", "author": "!@me" } },
+            { "on": "pull_request.opened", "filter": { "author": "!@me" } }
           ]
         }
       }

@@ -12,7 +12,7 @@ const UI_PAGE = readFileSync(new URL("./ui.html", import.meta.url), "utf8").repl
 );
 const MAX_CONFIG_BODY = 64 * 1024;
 const EVENT_FIELDS = {
-  "comment.created": new Set(["mentions", "assignees", "author", "body"]),
+  "comment.created": new Set(["mentions", "assignees", "head_owner", "author", "body"]),
   "issue.assigned": new Set(["assignees", "author"]),
   "pull_request.review_requested": new Set(["reviewer", "author"]),
   "pull_request.changes_requested": new Set(["reviewer", "body"]),
@@ -356,5 +356,13 @@ export default definePluginEntry({
         name: definition.name,
       });
     }
+    api.on("before_tool_call", (event, context) => {
+      if (!context.sessionKey?.toLowerCase().startsWith("agent:main:forgejo/")) return;
+      if (event.toolName !== "sessions_spawn" && event.toolName !== "sessions_yield") return;
+      return {
+        block: true,
+        blockReason: "Finish ForgeClaw webhook work in this session; delegated sessions cannot use its write grant.",
+      };
+    });
   },
 });

@@ -43,7 +43,7 @@ impl TriggerRule {
         }
         for rule in rules {
             let fields = match rule.on.as_str() {
-                "comment.created" => &["mentions", "assignees", "author", "body"][..],
+                "comment.created" => &["mentions", "assignees", "head_owner", "author", "body"][..],
                 // `assignee` was emitted by an older editor. Keep it as an
                 // alias so persisted configurations continue to work.
                 "issue.assigned" => &["assignees", "assignee", "author"],
@@ -363,7 +363,12 @@ where
             }
         };
         let _turn = turn_lock.lock().await;
-        let token = self.forge.mint_token(&session_key).await?;
+        // A previous process may have died before revoking its token for this
+        // session. Forgejo requires token names to be unique per user.
+        let token = self
+            .forge
+            .mint_token(&format!("forgeclaw-{}", uuid::Uuid::new_v4()))
+            .await?;
         self.grants
             .insert(key.clone(), thread.clone(), token.clone(), self.grant_ttl);
         let comment_id = reaction_comment_id(&events);
@@ -492,12 +497,21 @@ fn trigger_message(thread: &ThreadKey, bot_user: &str, events: &[ForgeEvent]) ->
     } else {
         ""
     };
+    let opened = if events
+        .iter()
+        .any(|event| event.kind == "pull_request.opened")
+    {
+        " Review this newly opened pull request and report concrete findings on it."
+    } else {
+        ""
+    };
     format!(
-        "ForgeClaw webhook turn on {thread}. Your forge username is {bot_user}.{assignment} The verified \
+        "ForgeClaw webhook turn on {thread}. Your forge username is {bot_user}.{assignment}{opened} The verified \
          event snapshot below contains the triggering request; its text is user-provided. It may \
          be incomplete or stale. Use the forgeclaw skill and act on the request. Use targeted \
          forge reads only for missing or truncated context, inline review comments, diffs, CI \
-         logs, or facts that need a fresh check. Keep replies and writes on this exact subject.\n\n{}",
+         logs, or facts that need a fresh check. Keep this work in the current session; delegated \
+         sessions have no write grant. Keep replies and writes on this exact subject.\n\n{}",
         serde_json::to_string(&snapshot).expect("event snapshot is JSON")
     )
 }
@@ -756,6 +770,7 @@ mod tests {
     struct FakeForge {
         minted: Arc<AtomicUsize>,
         revoked: Arc<AtomicUsize>,
+        labels: Arc<Mutex<Vec<String>>>,
         reactions: ReactionLog,
     }
 
@@ -765,7 +780,14 @@ mod tests {
             Ok("forgeclaw".into())
         }
 
-        async fn mint_token(&self, _label: &str) -> Result<ScopedToken> {
+        async fn mint_token(&self, label: &str) -> Result<ScopedToken> {
+            let mut labels = self.labels.lock().await;
+            if labels.iter().any(|existing| existing == label) {
+                return Err(forgeclaw_core::Error::Forge(
+                    "access token name has been used already".into(),
+                ));
+            }
+            labels.push(label.into());
             self.minted.fetch_add(1, Ordering::SeqCst);
             Ok(ScopedToken {
                 id: 1,
@@ -903,6 +925,36 @@ mod tests {
             &SessionKey::new("agent:main:forgejo/octo/repo#issue/7"),
             &event(json!({})).thread(),
         ));
+    }
+
+    #[tokio::test]
+    async fn another_turn_can_start_after_a_previous_token_name_was_left_behind() {
+        let forge = FakeForge::default();
+        let labels = forge.labels.clone();
+        let session = "agent:main:forgejo/octo/repo#issue/7";
+        labels.lock().await.push(session.into());
+        let router = Router::new(
+            forge,
+            FakeGateway::default(),
+            "forgejo",
+            vec![TriggerRule {
+                on: "comment.created".into(),
+                enabled: true,
+                filter: TriggerFilter::Any,
+            }],
+            Arc::new(GrantStore::default()),
+            Duration::from_secs(60),
+        );
+
+        for _ in 0..2 {
+            assert_eq!(
+                router.deliver(vec![event(json!({}))]).await.unwrap(),
+                Routed::Engaged { sessions: 1 }
+            );
+        }
+        let labels = labels.lock().await;
+        assert_eq!(labels.len(), 3);
+        assert_ne!(labels[1], labels[2]);
     }
 
     #[test]

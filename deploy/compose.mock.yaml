@@ -82,7 +82,9 @@ services:
     command: ["node", "/mock/check.mjs"]
     environment:
       FORGECLAW_FORGE_TOKEN: ${FORGECLAW_FORGE_TOKEN:-}
+      FORGECLAW_FORGE_PASSWORD: ${FORGECLAW_FORGE_PASSWORD:-}
       FORGECLAW_WEBHOOK_SECRET: ${FORGECLAW_WEBHOOK_SECRET:-}
+      FORGECLAW_MCP_AUTHORIZATION: ${FORGECLAW_MCP_AUTHORIZATION:-}
     volumes:
       - ./mock/check.mjs:/mock/check.mjs:ro
     depends_on:

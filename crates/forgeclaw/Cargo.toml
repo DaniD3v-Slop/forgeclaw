@@ -18,3 +18,4 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 tempfile = "3.27.0"
 tokio.workspace = true
 url.workspace = true
+uuid = { version = "1.18", features = ["v4"] }
