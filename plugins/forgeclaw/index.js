@@ -62,8 +62,8 @@ const tools = [
   {
     name: "forge_read_ci",
     label: "Read pull request CI",
-    description: "Read CI jobs and recent log excerpts for a pull request when needed.",
-    parameters: object({ subject }, ["subject"]),
+    description: "Read CI run and job statuses. Pass a job ID from the result to read its complete log in 8 KiB pages; follow next_offset until null.",
+    parameters: object({ subject, job_id: { type: "integer", minimum: 1 }, offset: { type: "integer", minimum: 0 } }, ["subject"]),
   },
   {
     name: "forge_read_diff",

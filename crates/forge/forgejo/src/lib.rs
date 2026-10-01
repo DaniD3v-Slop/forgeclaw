@@ -21,6 +21,7 @@ use url::Url;
 const EXCERPT_MAX: usize = 8 * 1024;
 const DIFF_PAGE_MAX: usize = 16 * 1024;
 const BODY_PAGE_MAX: usize = 8 * 1024;
+const CI_LOG_PAGE_MAX: usize = 8 * 1024;
 const REVIEW_COMMENTS_PAGE: usize = 5;
 const TOKEN_SCOPES: &[&str] = &["write:repository", "write:issue", "read:user"];
 const TEMP_TOKEN_PREFIX: &str = "forgeclaw-temp-";
@@ -439,6 +440,38 @@ impl Forgejo {
             .unwrap_or(Value::Null))
     }
 
+    pub async fn ci_log_page(
+        &self,
+        thread: &ThreadKey,
+        job_id: u64,
+        offset: usize,
+    ) -> Result<DiffPage> {
+        let Subject::Pr(number) = thread.subject else {
+            return Err(Error::Forge("CI requires a pull request subject".into()));
+        };
+        let run = self
+            .latest_run(&thread.repo, number)
+            .await
+            .ok_or_else(|| Error::Forge("pull request has no CI run".into()))?;
+        let run_id = run
+            .id
+            .ok_or_else(|| Error::Forge("CI run has no id".into()))?;
+        let job_id =
+            i64::try_from(job_id).map_err(|_| Error::Forge("job id is out of range".into()))?;
+        let (owner, name) = own(&thread.repo);
+        let jobs = go(self.api.list_action_run_jobs(owner, name, run_id)).await?;
+        if !jobs.iter().any(|job| job.id == Some(job_id)) {
+            return Err(Error::Forge(
+                "job is not in the pull request's latest CI run".into(),
+            ));
+        }
+        let log = go(self
+            .api
+            .repo_get_action_job_logs(owner, name, job_id, Default::default()))
+        .await?;
+        page(&log, offset, CI_LOG_PAGE_MAX)
+    }
+
     pub async fn diff_page(&self, thread: &ThreadKey, offset: usize) -> Result<DiffPage> {
         let Subject::Pr(number) = thread.subject else {
             return Err(Error::Forge("diff requires a pull request subject".into()));
@@ -777,6 +810,15 @@ impl Forge for Forgejo {
 
     async fn ci_context(&self, thread: &ThreadKey) -> Result<Value> {
         Forgejo::ci_context(self, thread).await
+    }
+
+    async fn ci_log_page(
+        &self,
+        thread: &ThreadKey,
+        job_id: u64,
+        offset: usize,
+    ) -> Result<DiffPage> {
+        Forgejo::ci_log_page(self, thread, job_id, offset).await
     }
 
     async fn diff_page(&self, thread: &ThreadKey, offset: usize) -> Result<DiffPage> {

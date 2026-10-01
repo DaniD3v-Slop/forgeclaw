@@ -627,13 +627,19 @@ async fn bridge_reads_pull_request_diff_page_and_ci_context() {
             "workflow_runs": [{"id": 8, "status": "failure", "workflow_id": "ci.yaml",
                 "event_payload": "{\"pull_request\":{\"number\":5}}"}]
         })))
-        .expect(1)
         .mount(&forge)
         .await;
     Mock::given(method("GET"))
         .and(path("/api/v1/repos/o/r/actions/runs/8/jobs"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
-        .expect(1)
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"id": 9, "name": "test", "status": "failure"}
+        ])))
+        .mount(&forge)
+        .await;
+    let log = format!("{}failure at the end\n", "deps-tools\n".repeat(1100));
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/o/r/actions/jobs/9/logs"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(log.clone()))
         .mount(&forge)
         .await;
     let (url, _workspace) = bridge(&forge, Arc::new(GrantStore::default())).await;
@@ -657,5 +663,50 @@ async fn bridge_reads_pull_request_diff_page_and_ci_context() {
     let ci: Value = serde_json::from_str(response["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(ci["id"], 8);
     assert_eq!(ci["status"], "failure");
+    assert_eq!(ci["jobs"][0]["id"], 9);
+    let (status, response) = call(
+        &url,
+        "forge_read_ci",
+        json!({"subject": "o/r#pr/5", "job_id": 9}),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let first: Value =
+        serde_json::from_str(response["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(first["text"].as_str().unwrap().len(), 8 * 1024);
+    let (status, response) = call(
+        &url,
+        "forge_read_ci",
+        json!({"subject": "o/r#pr/5", "job_id": 9, "offset": first["next_offset"]}),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let second: Value =
+        serde_json::from_str(response["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert!(
+        second["text"]
+            .as_str()
+            .unwrap()
+            .contains("failure at the end")
+    );
+    assert!(second["next_offset"].is_null());
+    assert_eq!(
+        format!(
+            "{}{}",
+            first["text"].as_str().unwrap(),
+            second["text"].as_str().unwrap()
+        ),
+        log
+    );
+    let (status, _) = call(
+        &url,
+        "forge_read_ci",
+        json!({"subject": "o/r#pr/5", "job_id": 10}),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     forge.verify().await;
 }

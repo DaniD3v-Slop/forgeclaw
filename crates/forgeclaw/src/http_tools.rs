@@ -166,12 +166,30 @@ async fn tool_call(
         }
         "forge_read_ci" => {
             let thread = subject(arguments)?;
-            let context = server
-                .forge
-                .ci_context(&thread)
-                .await
-                .map_err(|error| error.to_string())?;
-            serde_json::to_string(&context).map_err(|error| error.to_string())?
+            let result = if let Some(job_id) = arguments.get("job_id") {
+                let job_id = job_id
+                    .as_u64()
+                    .filter(|id| *id > 0)
+                    .ok_or("job_id must be a positive integer")?;
+                serde_json::to_value(
+                    server
+                        .forge
+                        .ci_log_page(&thread, job_id, offset(arguments)?)
+                        .await
+                        .map_err(|error| error.to_string())?,
+                )
+                .map_err(|error| error.to_string())?
+            } else {
+                if arguments.get("offset").is_some() {
+                    return Err("offset requires job_id".into());
+                }
+                server
+                    .forge
+                    .ci_context(&thread)
+                    .await
+                    .map_err(|error| error.to_string())?
+            };
+            serde_json::to_string(&result).map_err(|error| error.to_string())?
         }
         "forge_read_diff" => {
             let thread = subject(arguments)?;
