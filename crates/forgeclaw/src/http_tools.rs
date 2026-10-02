@@ -171,17 +171,26 @@ async fn tool_call(
                     .as_u64()
                     .filter(|id| *id > 0)
                     .ok_or("job_id must be a positive integer")?;
-                serde_json::to_value(
+                if let Some(query) = arguments.get("query") {
+                    let query = query.as_str().ok_or("query must be a string")?;
                     server
                         .forge
-                        .ci_log_page(&thread, job_id, offset(arguments)?)
+                        .ci_log_search(&thread, job_id, query, offset(arguments)?)
                         .await
-                        .map_err(|error| error.to_string())?,
-                )
-                .map_err(|error| error.to_string())?
+                        .map_err(|error| error.to_string())?
+                } else {
+                    serde_json::to_value(
+                        server
+                            .forge
+                            .ci_log_page(&thread, job_id, offset(arguments)?)
+                            .await
+                            .map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| error.to_string())?
+                }
             } else {
-                if arguments.get("offset").is_some() {
-                    return Err("offset requires job_id".into());
+                if arguments.get("offset").is_some() || arguments.get("query").is_some() {
+                    return Err("offset and query require job_id".into());
                 }
                 server
                     .forge

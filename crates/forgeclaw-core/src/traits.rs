@@ -32,6 +32,13 @@ pub trait Forge: Send + Sync {
     async fn ci_context(&self, thread: &ThreadKey) -> Result<Value>;
     async fn ci_log_page(&self, thread: &ThreadKey, job_id: u64, offset: usize)
     -> Result<DiffPage>;
+    async fn ci_log_search(
+        &self,
+        thread: &ThreadKey,
+        job_id: u64,
+        query: &str,
+        offset: usize,
+    ) -> Result<Value>;
     async fn diff_page(&self, thread: &ThreadKey, offset: usize) -> Result<DiffPage>;
     async fn ensure_fork(&self, repo: &RepoId) -> Result<RepoId>;
     async fn search_issues(&self, repo: &RepoId, query: &str) -> Result<Vec<IssueSummary>>;

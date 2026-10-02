@@ -700,6 +700,57 @@ async fn bridge_reads_pull_request_diff_page_and_ci_context() {
         ),
         log
     );
+    let (status, response) = call(
+        &url,
+        "forge_read_ci",
+        json!({"subject": "o/r#pr/5", "job_id": 9, "query": "DEPS-TOOLS"}),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let search: Value =
+        serde_json::from_str(response["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(search["matches"].as_array().unwrap().len(), 20);
+    assert_eq!(search["matches"][0]["line_number"], 1);
+    let (status, response) = call(
+        &url,
+        "forge_read_ci",
+        json!({"subject": "o/r#pr/5", "job_id": 9, "query": "deps-tools", "offset": search["next_offset"]}),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let next_search: Value =
+        serde_json::from_str(response["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(next_search["matches"][0]["line_number"], 21);
+    let (status, response) = call(
+        &url,
+        "forge_read_ci",
+        json!({"subject": "o/r#pr/5", "job_id": 9, "query": "FAILURE"}),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let failure: Value =
+        serde_json::from_str(response["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(failure["matches"].as_array().unwrap().len(), 1);
+    assert_eq!(failure["matches"][0]["line_number"], 1101);
+    let (status, response) = call(
+        &url,
+        "forge_read_ci",
+        json!({"subject": "o/r#pr/5", "job_id": 9, "offset": failure["matches"][0]["offset"]}),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let at_failure: Value =
+        serde_json::from_str(response["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert!(
+        at_failure["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("failure at the end")
+    );
     let (status, _) = call(
         &url,
         "forge_read_ci",

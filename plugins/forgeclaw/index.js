@@ -62,8 +62,8 @@ const tools = [
   {
     name: "forge_read_ci",
     label: "Read pull request CI",
-    description: "Read CI run and job statuses. Pass a job ID from the result to read its complete log in 8 KiB pages; follow next_offset until null.",
-    parameters: object({ subject, job_id: { type: "integer", minimum: 1 }, offset: { type: "integer", minimum: 0 } }, ["subject"]),
+    description: "Read CI job statuses, page a complete job log, or search it. Pass job_id and query for up to 20 matching lines; follow next_offset to search more. Use a match's offset with job_id and no query to read the log from that match in 8 KiB pages.",
+    parameters: object({ subject, job_id: { type: "integer", minimum: 1 }, query: { type: "string", minLength: 1, maxLength: 128 }, offset: { type: "integer", minimum: 0 } }, ["subject"]),
   },
   {
     name: "forge_read_diff",

@@ -22,6 +22,9 @@ const EXCERPT_MAX: usize = 8 * 1024;
 const DIFF_PAGE_MAX: usize = 16 * 1024;
 const BODY_PAGE_MAX: usize = 8 * 1024;
 const CI_LOG_PAGE_MAX: usize = 8 * 1024;
+const CI_SEARCH_PAGE_MAX: usize = 20;
+const CI_SEARCH_LINE_MAX: usize = 512;
+const CI_SEARCH_QUERY_MAX: usize = 128;
 const REVIEW_COMMENTS_PAGE: usize = 5;
 const TOKEN_SCOPES: &[&str] = &["write:repository", "write:issue", "read:user"];
 const TEMP_TOKEN_PREFIX: &str = "forgeclaw-temp-";
@@ -446,6 +449,64 @@ impl Forgejo {
         job_id: u64,
         offset: usize,
     ) -> Result<DiffPage> {
+        let log = self.ci_job_log(thread, job_id).await?;
+        page(&log, offset, CI_LOG_PAGE_MAX)
+    }
+
+    pub async fn ci_log_search(
+        &self,
+        thread: &ThreadKey,
+        job_id: u64,
+        query: &str,
+        offset: usize,
+    ) -> Result<Value> {
+        if query.is_empty() || query.len() > CI_SEARCH_QUERY_MAX {
+            return Err(Error::Forge("query must be 1 to 128 bytes".into()));
+        }
+        let log = self.ci_job_log(thread, job_id).await?;
+        if offset > log.len()
+            || !log.is_char_boundary(offset)
+            || (offset > 0 && log.as_bytes()[offset - 1] != b'\n')
+        {
+            return Err(Error::Forge(
+                "search offset must be the start of a log line".into(),
+            ));
+        }
+        let needle = query.to_ascii_lowercase();
+        let mut line_start = 0;
+        let mut matches = Vec::new();
+        let mut next_offset = None;
+        for (index, line) in log.split_inclusive('\n').enumerate() {
+            let start = line_start;
+            line_start += line.len();
+            if start < offset {
+                continue;
+            }
+            let line = line.trim_end_matches(['\r', '\n']);
+            if let Some(position) = line.to_ascii_lowercase().find(&needle) {
+                let mut excerpt_start = position.saturating_sub(160);
+                while !line.is_char_boundary(excerpt_start) {
+                    excerpt_start -= 1;
+                }
+                let mut excerpt_end = line.len().min(excerpt_start + CI_SEARCH_LINE_MAX);
+                while !line.is_char_boundary(excerpt_end) {
+                    excerpt_end -= 1;
+                }
+                matches.push(json!({
+                    "line_number": index + 1,
+                    "offset": start + position,
+                    "text": &line[excerpt_start..excerpt_end],
+                }));
+                if matches.len() == CI_SEARCH_PAGE_MAX {
+                    next_offset = (line_start < log.len()).then_some(line_start);
+                    break;
+                }
+            }
+        }
+        Ok(json!({"matches": matches, "next_offset": next_offset}))
+    }
+
+    async fn ci_job_log(&self, thread: &ThreadKey, job_id: u64) -> Result<String> {
         let Subject::Pr(number) = thread.subject else {
             return Err(Error::Forge("CI requires a pull request subject".into()));
         };
@@ -465,11 +526,10 @@ impl Forgejo {
                 "job is not in the pull request's latest CI run".into(),
             ));
         }
-        let log = go(self
+        go(self
             .api
             .repo_get_action_job_logs(owner, name, job_id, Default::default()))
-        .await?;
-        page(&log, offset, CI_LOG_PAGE_MAX)
+        .await
     }
 
     pub async fn diff_page(&self, thread: &ThreadKey, offset: usize) -> Result<DiffPage> {
@@ -819,6 +879,16 @@ impl Forge for Forgejo {
         offset: usize,
     ) -> Result<DiffPage> {
         Forgejo::ci_log_page(self, thread, job_id, offset).await
+    }
+
+    async fn ci_log_search(
+        &self,
+        thread: &ThreadKey,
+        job_id: u64,
+        query: &str,
+        offset: usize,
+    ) -> Result<Value> {
+        Forgejo::ci_log_search(self, thread, job_id, query, offset).await
     }
 
     async fn diff_page(&self, thread: &ThreadKey, offset: usize) -> Result<DiffPage> {
