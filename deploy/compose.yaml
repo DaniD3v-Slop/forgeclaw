@@ -46,7 +46,7 @@ services:
       - ${XDG_RUNTIME_DIR:-/run/user/1000}/podman/podman.sock:/run/user/1000/podman/podman.sock
 
   openclaw-gateway:
-    image: ghcr.io/openclaw/openclaw:2026.9.6-browser
+    image: ghcr.io/openclaw/openclaw:2026.9.7-browser
     command:
       - sh
       - -c

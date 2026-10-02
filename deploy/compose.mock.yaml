@@ -1,7 +1,7 @@
 services:
   mock-model:
     profiles: [mock]
-    image: ghcr.io/openclaw/openclaw:2026.9.6-browser
+    image: ghcr.io/openclaw/openclaw:2026.9.7-browser
     command: ["node", "/mock/model.mjs"]
     volumes:
       - ./mock/model.mjs:/mock/model.mjs:ro
@@ -24,7 +24,7 @@ services:
 
   openclaw-mock-gateway:
     profiles: [mock]
-    image: ghcr.io/openclaw/openclaw:2026.9.6-browser
+    image: ghcr.io/openclaw/openclaw:2026.9.7-browser
     command: ["node", "openclaw.mjs", "gateway", "--bind", "lan"]
     environment:
       OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
@@ -78,7 +78,7 @@ services:
 
   mock-check:
     profiles: [mock]
-    image: ghcr.io/openclaw/openclaw:2026.9.6-browser
+    image: ghcr.io/openclaw/openclaw:2026.9.7-browser
     command: ["node", "/mock/check.mjs"]
     environment:
       FORGECLAW_FORGE_TOKEN: ${FORGECLAW_FORGE_TOKEN:-}
