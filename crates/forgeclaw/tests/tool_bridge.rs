@@ -539,11 +539,18 @@ fn git(path: &Path, args: &[&str]) {
 async fn checkout_and_push_create_a_branch_but_reject_ungranted_updates() {
     let forge = MockServer::start().await;
     let git_root = tempfile::tempdir().unwrap();
-    let bare_dir = git_root.path().join("bot");
-    std::fs::create_dir(&bare_dir).unwrap();
-    let bare = bare_dir.join("r.git");
+    let fork_dir = git_root.path().join("bot");
+    let upstream_dir = git_root.path().join("o");
+    std::fs::create_dir(&fork_dir).unwrap();
+    std::fs::create_dir(&upstream_dir).unwrap();
+    let bare = fork_dir.join("r.git");
+    let upstream = upstream_dir.join("r.git");
     let seed = git_root.path().join("seed");
     git(git_root.path(), &["init", "--bare", bare.to_str().unwrap()]);
+    git(
+        git_root.path(),
+        &["init", "--bare", upstream.to_str().unwrap()],
+    );
     git(
         git_root.path(),
         &["init", "-b", "main", seed.to_str().unwrap()],
@@ -553,38 +560,63 @@ async fn checkout_and_push_create_a_branch_but_reject_ungranted_updates() {
     std::fs::write(seed.join("README.md"), "one\n").unwrap();
     git(&seed, &["add", "README.md"]);
     git(&seed, &["commit", "-m", "seed"]);
-    git(&seed, &["remote", "add", "origin", bare.to_str().unwrap()]);
-    git(&seed, &["push", "origin", "main"]);
-    git(
-        git_root.path(),
-        &[
-            "--git-dir",
-            bare.to_str().unwrap(),
-            "symbolic-ref",
-            "HEAD",
-            "refs/heads/main",
-        ],
-    );
+    git(&seed, &["push", upstream.to_str().unwrap(), "main"]);
+    git(&seed, &["switch", "--orphan", "fork-root"]);
+    std::fs::write(seed.join("README.md"), "fork root\n").unwrap();
+    git(&seed, &["add", "README.md"]);
+    git(&seed, &["commit", "-m", "fork root"]);
+    git(&seed, &["push", bare.to_str().unwrap(), "HEAD:main"]);
+    for remote in [&bare, &upstream] {
+        git(
+            git_root.path(),
+            &[
+                "--git-dir",
+                remote.to_str().unwrap(),
+                "symbolic-ref",
+                "HEAD",
+                "refs/heads/main",
+            ],
+        );
+    }
 
     Mock::given(method("GET"))
         .and(path("/api/v1/user"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"login": "bot"})))
         .mount(&forge)
         .await;
-    mock_temporary_tokens(&forge, 31, 3).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/repos/o/r/forks"))
+        .respond_with(
+            ResponseTemplate::new(409).set_body_json(json!({"message": "already forked"})),
+        )
+        .mount(&forge)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/o/r/forks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+            "name": "r", "owner": {"login": "bot"}
+        }])))
+        .mount(&forge)
+        .await;
+    mock_temporary_tokens(&forge, 31, 4).await;
     let (url, workspace) = bridge_at(
         &forge,
         Arc::new(GrantStore::default()),
         Url::from_directory_path(git_root.path()).unwrap(),
     )
     .await;
-    let subject = json!({"subject": "bot/r#issue/7"});
+    let subject = json!({"subject": "o/r#issue/7"});
     let (status, response) = call(&url, "forge_checkout", subject, None).await;
     assert_eq!(status, StatusCode::OK, "{response}");
-    let checkout = workspace.path().join("bot/r/issue-7");
+    let checkout = workspace.path().join("o/r/issue-7");
     assert_eq!(
         std::fs::read_to_string(checkout.join("README.md")).unwrap(),
-        "one\n"
+        "fork root\n"
+    );
+    assert!(
+        std::fs::read_to_string(checkout.join(".git/config"))
+            .unwrap()
+            .contains(upstream.to_str().unwrap())
     );
 
     git(&checkout, &["checkout", "-b", "feature"]);
@@ -592,7 +624,19 @@ async fn checkout_and_push_create_a_branch_but_reject_ungranted_updates() {
     git(&checkout, &["config", "user.name", "ForgeClaw test"]);
     git(&checkout, &["config", "user.email", "test@example.invalid"]);
     git(&checkout, &["commit", "-am", "feature"]);
-    let arguments = json!({"subject": "bot/r#issue/7", "branch": "feature"});
+    let arguments = json!({"subject": "o/r#issue/7", "branch": "feature"});
+    let (status, response) = call(&url, "forge_push", arguments.clone(), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        response["error"]
+            .as_str()
+            .unwrap()
+            .contains("no common ancestor")
+    );
+
+    git(&checkout, &["reset", "--hard", "upstream/HEAD"]);
+    std::fs::write(checkout.join("README.md"), "two\n").unwrap();
+    git(&checkout, &["commit", "-am", "feature on upstream"]);
     let (status, response) = call(&url, "forge_push", arguments.clone(), None).await;
     assert_eq!(status, StatusCode::OK, "{response}");
     git(

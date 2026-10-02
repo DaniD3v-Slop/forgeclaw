@@ -428,6 +428,7 @@ async fn tool_call(
             let repo = result?;
             sync_checkout(
                 &server.clone_url(&repo)?,
+                &server.clone_url(&thread.repo)?,
                 Some(server.read_token.as_str()),
                 &path,
             )
@@ -460,6 +461,13 @@ async fn tool_call(
                     require_write(server, session, &thread)?;
                     require_bot_owned_pr(server, &thread, branch).await?;
                 }
+                sync_upstream(
+                    &server.clone_url(&thread.repo)?,
+                    Some(&server.read_token),
+                    &path,
+                )
+                .await?;
+                require_upstream_ancestry(&path).await?;
                 push_from_clean_repo(&path, &url, &temporary.secret, branch, !exists).await
             }
             .await;
@@ -585,10 +593,16 @@ async fn clone(url: &Url, token: Option<&str>, path: &Path) -> Result<(), String
     run_git(command, token).await
 }
 
-async fn sync_checkout(url: &Url, token: Option<&str>, path: &Path) -> Result<String, String> {
+async fn sync_checkout(
+    url: &Url,
+    upstream: &Url,
+    token: Option<&str>,
+    path: &Path,
+) -> Result<String, String> {
     if !path.join(".git").is_dir() {
         clone(url, token, path).await?;
-        return Ok(path.display().to_string());
+        sync_upstream(upstream, token, path).await?;
+        return Ok(checkout_message(path, ""));
     }
 
     let mirror = tempdir().map_err(|error| error.to_string())?;
@@ -611,6 +625,7 @@ async fn sync_checkout(url: &Url, token: Option<&str>, path: &Path) -> Result<St
         "+refs/heads/*:refs/remotes/origin/*",
     ]);
     run_git(fetch, None).await?;
+    sync_upstream(upstream, token, path).await?;
 
     let clean = git_output(path, ["status", "--porcelain"])
         .await?
@@ -639,7 +654,62 @@ async fn sync_checkout(url: &Url, token: Option<&str>, path: &Path) -> Result<St
     let warning = (!clean).then_some(
         "\nThe checkout has existing changes; remote refs were refreshed without modifying them.",
     );
-    Ok(format!("{}{}", path.display(), warning.unwrap_or_default()))
+    Ok(checkout_message(path, warning.unwrap_or_default()))
+}
+
+fn checkout_message(path: &Path, warning: &str) -> String {
+    format!(
+        "{}\norigin is the bot fork; upstream is the requested repository. Start new PR work from upstream/HEAD and check branch ancestry before pushing.{}",
+        path.display(),
+        warning
+    )
+}
+
+async fn sync_upstream(url: &Url, token: Option<&str>, path: &Path) -> Result<(), String> {
+    let mut configure = Command::new("git");
+    configure.current_dir(path).args([
+        "config",
+        "--replace-all",
+        "remote.upstream.url",
+        url.as_str(),
+    ]);
+    run_git(configure, None).await?;
+    let mut configure_fetch = Command::new("git");
+    configure_fetch.current_dir(path).args([
+        "config",
+        "--replace-all",
+        "remote.upstream.fetch",
+        "+refs/heads/*:refs/remotes/upstream/*",
+    ]);
+    run_git(configure_fetch, None).await?;
+    let mut fetch = Command::new("git");
+    fetch
+        .current_dir(path)
+        .args(["fetch", "--quiet", "--no-tags", "upstream"]);
+    run_git(fetch, token).await?;
+    let mut head = Command::new("git");
+    head.current_dir(path)
+        .args(["remote", "set-head", "upstream", "-a"]);
+    run_git(head, token).await
+}
+
+async fn require_upstream_ancestry(path: &Path) -> Result<(), String> {
+    let mut ancestor = Command::new("git");
+    ancestor
+        .current_dir(path)
+        .args(["merge-base", "upstream/HEAD", "HEAD"]);
+    scrub_git_environment(&mut ancestor);
+    if ancestor
+        .output()
+        .await
+        .map_err(|error| error.to_string())?
+        .status
+        .success()
+    {
+        Ok(())
+    } else {
+        Err("branch has no common ancestor with the upstream default branch; rebuild it from upstream/HEAD before pushing".into())
+    }
 }
 
 async fn push_from_clean_repo(
@@ -903,20 +973,76 @@ mod tests {
         );
 
         let url = Url::from_file_path(&origin).unwrap();
-        sync_checkout(&url, Some("dummy-token"), &checkout)
+        sync_checkout(&url, &url, Some("dummy-token"), &checkout)
             .await
             .unwrap();
         std::fs::write(seed.join("README.md"), "two\n").unwrap();
         git(&seed, &["commit", "-am", "two"]);
         git(&seed, &["push"]);
 
-        sync_checkout(&url, Some("dummy-token"), &checkout)
+        sync_checkout(&url, &url, Some("dummy-token"), &checkout)
             .await
             .unwrap();
         assert_eq!(
             std::fs::read_to_string(checkout.join("README.md")).unwrap(),
             "two\n"
         );
+    }
+
+    #[tokio::test]
+    async fn fork_checkout_exposes_upstream_and_rejects_unrelated_history() {
+        let root = tempdir().unwrap();
+        let fork = root.path().join("fork.git");
+        let upstream = root.path().join("upstream.git");
+        let seed = root.path().join("seed");
+        let checkout = root.path().join("checkout");
+        for remote in [&fork, &upstream] {
+            git(root.path(), &["init", "--bare", remote.to_str().unwrap()]);
+            git(
+                root.path(),
+                &[
+                    "--git-dir",
+                    remote.to_str().unwrap(),
+                    "symbolic-ref",
+                    "HEAD",
+                    "refs/heads/main",
+                ],
+            );
+        }
+        git(root.path(), &["init", "-b", "main", seed.to_str().unwrap()]);
+        git(&seed, &["config", "user.email", "test@example.invalid"]);
+        git(&seed, &["config", "user.name", "Forgeclaw test"]);
+        std::fs::write(seed.join("README.md"), "upstream\n").unwrap();
+        git(&seed, &["add", "README.md"]);
+        git(&seed, &["commit", "-m", "upstream root"]);
+        git(&seed, &["push", upstream.to_str().unwrap(), "main"]);
+        git(&seed, &["switch", "--orphan", "fork-root"]);
+        std::fs::write(seed.join("README.md"), "fork\n").unwrap();
+        git(&seed, &["add", "README.md"]);
+        git(&seed, &["commit", "-m", "fork root"]);
+        git(&seed, &["push", fork.to_str().unwrap(), "HEAD:main"]);
+
+        let fork_url = Url::from_file_path(&fork).unwrap();
+        let upstream_url = Url::from_file_path(&upstream).unwrap();
+        let message = sync_checkout(&fork_url, &upstream_url, None, &checkout)
+            .await
+            .unwrap();
+        assert!(message.contains("origin is the bot fork; upstream is the requested repository"));
+        assert_eq!(
+            git_output(&checkout, ["remote", "get-url", "upstream"])
+                .await
+                .unwrap(),
+            upstream_url.as_str()
+        );
+        assert_eq!(
+            git_output(&checkout, ["symbolic-ref", "refs/remotes/upstream/HEAD"])
+                .await
+                .unwrap(),
+            "refs/remotes/upstream/main"
+        );
+        assert!(require_upstream_ancestry(&checkout).await.is_err());
+        git(&checkout, &["switch", "-c", "fix", "upstream/HEAD"]);
+        assert!(require_upstream_ancestry(&checkout).await.is_ok());
     }
 
     #[tokio::test]
