@@ -438,6 +438,11 @@ async fn tool_call(
             let thread = subject(arguments)?;
             let branch = string(arguments, "branch")?;
             valid_branch(branch)?;
+            let force = match arguments.get("force") {
+                None => false,
+                Some(Value::Bool(force)) => *force,
+                Some(_) => return Err("force must be a boolean".into()),
+            };
             let path = server.checkout_path(&thread, true);
             if !path.join(".git").is_dir() {
                 return Err("checkout the subject before pushing".into());
@@ -456,8 +461,11 @@ async fn tool_call(
                     .await
                     .map_err(|error| error.to_string())?;
                 let url = server.clone_url(&fork)?;
-                let exists = remote_branch_exists(&url, &temporary.secret, branch).await?;
-                if exists {
+                let expected_head = remote_branch_head(&url, &temporary.secret, branch).await?;
+                if force && expected_head.is_none() {
+                    return Err("force requires an existing branch".into());
+                }
+                if expected_head.is_some() {
                     require_write(server, session, &thread)?;
                     require_bot_owned_pr(server, &thread, branch).await?;
                 }
@@ -468,7 +476,15 @@ async fn tool_call(
                 )
                 .await?;
                 require_upstream_ancestry(&path).await?;
-                push_from_clean_repo(&path, &url, &temporary.secret, branch, !exists).await
+                push_from_clean_repo(
+                    &path,
+                    &url,
+                    &temporary.secret,
+                    branch,
+                    expected_head.as_deref(),
+                    force,
+                )
+                .await
             }
             .await;
             server
@@ -717,7 +733,8 @@ async fn push_from_clean_repo(
     url: &Url,
     token: &str,
     branch: &str,
-    create_only: bool,
+    expected_head: Option<&str>,
+    force: bool,
 ) -> Result<(), String> {
     let staging = tempdir().map_err(|error| error.to_string())?;
     let bare = staging.path().join("push.git");
@@ -748,14 +765,21 @@ async fn push_from_clean_repo(
         "push",
         "--no-verify",
     ]);
-    if create_only {
-        push.arg(format!("--force-with-lease=refs/heads/{branch}:"));
+    if force || expected_head.is_none() {
+        push.arg(format!(
+            "--force-with-lease=refs/heads/{branch}:{}",
+            expected_head.unwrap_or_default()
+        ));
     }
     push.args([url.as_str(), &format!("FETCH_HEAD:refs/heads/{branch}")]);
     run_git(push, Some(token)).await
 }
 
-async fn remote_branch_exists(url: &Url, token: &str, branch: &str) -> Result<bool, String> {
+async fn remote_branch_head(
+    url: &Url,
+    token: &str,
+    branch: &str,
+) -> Result<Option<String>, String> {
     let mut command = Command::new("git");
     command.args([
         "ls-remote",
@@ -772,10 +796,22 @@ async fn remote_branch_exists(url: &Url, token: &str, branch: &str) -> Result<bo
             "GIT_CONFIG_VALUE_0",
             format!("Authorization: token {token}"),
         );
-    let status = command.status().await.map_err(|error| error.to_string())?;
-    match status.code() {
-        Some(0) => Ok(true),
-        Some(2) => Ok(false),
+    let output = command.output().await.map_err(|error| error.to_string())?;
+    match output.status.code() {
+        Some(0) => {
+            let text = String::from_utf8(output.stdout).map_err(|error| error.to_string())?;
+            let mut fields = text.split_whitespace();
+            let head = fields.next().ok_or("missing remote branch revision")?;
+            let reference = fields.next().ok_or("missing remote branch name")?;
+            if reference != format!("refs/heads/{branch}")
+                || !matches!(head.len(), 40 | 64)
+                || !head.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err("invalid remote branch revision".into());
+            }
+            Ok(Some(head.into()))
+        }
+        Some(2) => Ok(None),
         _ => Err("cannot check remote branch".into()),
     }
 }
@@ -1118,25 +1154,89 @@ mod tests {
                 .unwrap()
                 .success()
         );
-        push_from_clean_repo(&checkout, &url, "dummy-token", "feature", true)
+        push_from_clean_repo(&checkout, &url, "dummy-token", "feature", None, false)
             .await
             .unwrap();
         assert!(
-            remote_branch_exists(&url, "dummy-token", "feature")
+            remote_branch_head(&url, "dummy-token", "feature")
                 .await
                 .unwrap()
+                .is_some()
         );
         assert!(
-            !remote_branch_exists(&url, "dummy-token", "other")
+            remote_branch_head(&url, "dummy-token", "other")
                 .await
                 .unwrap()
+                .is_none()
         );
         std::fs::write(checkout.join("README.md"), "changed\n").unwrap();
         git(&checkout, &["commit", "-am", "second"]);
         assert!(
-            push_from_clean_repo(&checkout, &url, "dummy-token", "feature", true)
+            push_from_clean_repo(&checkout, &url, "dummy-token", "feature", None, false)
                 .await
                 .is_err()
+        );
+        let first_head = remote_branch_head(&url, "dummy-token", "feature")
+            .await
+            .unwrap()
+            .unwrap();
+        push_from_clean_repo(
+            &checkout,
+            &url,
+            "dummy-token",
+            "feature",
+            Some(&first_head),
+            false,
+        )
+        .await
+        .unwrap();
+        let second_head = remote_branch_head(&url, "dummy-token", "feature")
+            .await
+            .unwrap()
+            .unwrap();
+        git(&checkout, &["reset", "--hard", "HEAD~1"]);
+        std::fs::write(checkout.join("README.md"), "rewritten\n").unwrap();
+        git(&checkout, &["commit", "-am", "rewritten second"]);
+        assert!(
+            push_from_clean_repo(
+                &checkout,
+                &url,
+                "dummy-token",
+                "feature",
+                Some(&second_head),
+                false,
+            )
+            .await
+            .is_err()
+        );
+        push_from_clean_repo(
+            &checkout,
+            &url,
+            "dummy-token",
+            "feature",
+            Some(&second_head),
+            true,
+        )
+        .await
+        .unwrap();
+        let rewritten_head = remote_branch_head(&url, "dummy-token", "feature")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(rewritten_head, second_head);
+        std::fs::write(checkout.join("README.md"), "third\n").unwrap();
+        git(&checkout, &["commit", "-am", "third"]);
+        assert!(
+            push_from_clean_repo(
+                &checkout,
+                &url,
+                "dummy-token",
+                "feature",
+                Some(&second_head),
+                true,
+            )
+            .await
+            .is_err()
         );
         let config = std::fs::read_to_string(checkout.join(".git/config")).unwrap();
         assert!(!config.contains("dummy-token"));

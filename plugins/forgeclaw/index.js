@@ -138,8 +138,8 @@ const tools = [
   {
     name: "forge_push",
     label: "Push forge branch",
-    description: "Create a new branch from the subject checkout. Updating an existing branch requires authority over its pull request.",
-    parameters: object({ subject, branch: string }, ["subject", "branch"]),
+    description: "Create a branch or update an existing bot-owned pull request branch. Use force: true only to rewrite that branch after rebuilding it on the upstream base; the update uses an exact force-with-lease.",
+    parameters: object({ subject, branch: string, force: { type: "boolean" } }, ["subject", "branch"]),
   },
 ];
 

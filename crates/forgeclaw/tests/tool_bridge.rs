@@ -535,6 +535,16 @@ fn git(path: &Path, args: &[&str]) {
     );
 }
 
+fn git_output(path: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(path)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout).unwrap().trim().into()
+}
+
 #[tokio::test]
 async fn checkout_and_push_create_a_branch_but_reject_ungranted_updates() {
     let forge = MockServer::start().await;
@@ -652,6 +662,127 @@ async fn checkout_and_push_create_a_branch_but_reject_ungranted_updates() {
     let (status, response) = call(&url, "forge_push", arguments, None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(response["error"], "missing OpenClaw session identity");
+    forge.verify().await;
+}
+
+#[tokio::test]
+async fn authorized_bot_pr_can_rewrite_its_branch_with_explicit_force() {
+    let forge = MockServer::start().await;
+    let git_root = tempfile::tempdir().unwrap();
+    for owner in ["o", "bot"] {
+        std::fs::create_dir(git_root.path().join(owner)).unwrap();
+        git(
+            git_root.path(),
+            &[
+                "init",
+                "--bare",
+                git_root.path().join(owner).join("r.git").to_str().unwrap(),
+            ],
+        );
+    }
+    let upstream = git_root.path().join("o/r.git");
+    let fork = git_root.path().join("bot/r.git");
+    let seed = git_root.path().join("seed");
+    git(
+        git_root.path(),
+        &["init", "-b", "main", seed.to_str().unwrap()],
+    );
+    git(&seed, &["config", "user.name", "ForgeClaw test"]);
+    git(&seed, &["config", "user.email", "test@example.invalid"]);
+    std::fs::write(seed.join("README.md"), "base\n").unwrap();
+    git(&seed, &["add", "README.md"]);
+    git(&seed, &["commit", "-m", "base"]);
+    git(&seed, &["push", upstream.to_str().unwrap(), "main"]);
+    git(&seed, &["push", fork.to_str().unwrap(), "main"]);
+    git(&seed, &["switch", "-c", "fix"]);
+    std::fs::write(seed.join("README.md"), "old fix\n").unwrap();
+    git(&seed, &["commit", "-am", "old fix"]);
+    git(&seed, &["push", fork.to_str().unwrap(), "fix"]);
+    git(
+        git_root.path(),
+        &[
+            "--git-dir",
+            fork.to_str().unwrap(),
+            "symbolic-ref",
+            "HEAD",
+            "refs/heads/main",
+        ],
+    );
+    git(
+        git_root.path(),
+        &[
+            "--git-dir",
+            upstream.to_str().unwrap(),
+            "symbolic-ref",
+            "HEAD",
+            "refs/heads/main",
+        ],
+    );
+
+    mock_pr_context(&forge, "bot").await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/repos/o/r/forks"))
+        .respond_with(
+            ResponseTemplate::new(409).set_body_json(json!({"message": "already forked"})),
+        )
+        .mount(&forge)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/o/r/forks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+            "name": "r", "owner": {"login": "bot"}
+        }])))
+        .mount(&forge)
+        .await;
+    mock_temporary_tokens(&forge, 32, 2).await;
+    let grants = Arc::new(GrantStore::default());
+    let (url, workspace) = bridge_at(
+        &forge,
+        grants.clone(),
+        Url::from_directory_path(git_root.path()).unwrap(),
+    )
+    .await;
+    let subject = json!({"subject": "o/r#pr/5"});
+    let (status, response) = call(&url, "forge_checkout", subject, None).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let checkout = workspace.path().join("o/r/pr-5");
+    git(&checkout, &["switch", "-c", "fix", "origin/fix"]);
+    git(&checkout, &["reset", "--hard", "upstream/HEAD"]);
+    git(&checkout, &["config", "user.name", "ForgeClaw test"]);
+    git(&checkout, &["config", "user.email", "test@example.invalid"]);
+    std::fs::write(checkout.join("README.md"), "new fix\n").unwrap();
+    git(&checkout, &["commit", "-am", "new fix"]);
+    let _lease = grants.insert(
+        SessionKey::new("pr-session"),
+        ThreadKey {
+            repo: "o/r".parse().unwrap(),
+            subject: Subject::Pr(5),
+        },
+        ScopedToken {
+            id: 9,
+            secret: "scoped-token".into(),
+        },
+    );
+    let (status, response) = call(
+        &url,
+        "forge_push",
+        json!({"subject": "o/r#pr/5", "branch": "fix", "force": true}),
+        Some("pr-session"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(
+        git_output(&checkout, &["rev-parse", "HEAD"]),
+        git_output(
+            git_root.path(),
+            &[
+                "--git-dir",
+                fork.to_str().unwrap(),
+                "rev-parse",
+                "refs/heads/fix"
+            ]
+        )
+    );
     forge.verify().await;
 }
 
